@@ -140,6 +140,12 @@ static int   g_worldFull = 1;
 static int   g_worldBottomDefault = 0, g_worldTopDefault = 0;
 #define WORLD_B0 0.13f
 #define WORLD_T0 (-0.02f)
+// ---- map-click gate. Before picking the terrain under the cursor the world rejects any click whose UI y is
+//      >= 0.577 (fld dword ptr [0.577f] at 0x39799C, just under the original 0.58 top of the world view). With
+//      WorldFullHeight the world is drawn up to 0.6, so the strip beside the top bar showed the world but took no
+//      clicks. Point that operand at our own value: no upper gate when the world is full height. ----
+#define RVA_PickTopFld 0x39799C          // d9 05 <addr of 0.577f>
+static float g_pickTop = 0.577f;
 
 static int g_heroEdge = 1;     // HeroBarEdge=1: hero portraits (top-left) hug the left screen edge
 static int g_cineFull = 1;     // CinematicFullWidth=1: cinematic letterbox panel spans the full width
@@ -1325,7 +1331,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.4  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.4.1  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
@@ -1356,6 +1362,13 @@ static void Install(void)
     // 2) UI ortho projection: right edge = our width
     u32 pf = (u32)&g_uiW_f;
     WriteMem(g_base + RVA_OrthoFld + 2, &pf, 4);
+    // 2b) map-click gate: let clicks reach the world in the strip beside the top bar (WorldFullHeight)
+    if (*(uint16_t*)(g_base + RVA_PickTopFld) == 0x05D9 && *(u32*)(g_base + RVA_PickTopFld + 2) == g_base + 0x941548) {
+        g_pickTop = g_worldFull ? 1.0f : 0.577f;
+        u32 pp = (u32)&g_pickTop;
+        WriteMem(g_base + RVA_PickTopFld + 2, &pp, 4);
+        logf_("map-click gate: top %.3f", g_pickTop);
+    } else logf_("map-click gate code not recognised, left as is");
 
     // 3) keep HUD frames in the centered 4:3 area
     ClearAllPoints = (ClearAllPoints_t)(g_base + RVA_ClearAllPoints);

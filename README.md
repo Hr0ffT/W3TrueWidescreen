@@ -81,6 +81,11 @@ i686-w64-mingw32-gcc -O2 -Wall -shared -static-libgcc -s -o W3TrueWidescreen.mix
 
 The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to the monitor. The mod widens that space to `0.6 × aspect` and re-anchors the frames: the console to the centred 4:3 area, the menus to the edges. It then rebuilds the world and menu projection so the vertical field of view matches 4:3. The campaign fade model is read from the game archives, stretched to the screen width and cached in `W3TrueWidescreen_cache`. For the movies it skips the game's display mode switch and gamma ramp and, when the `W3TrueWidescreen` folder is present, builds the DirectShow graph from LAV Filters and MPC Video Renderer.
 
+## Changelog
+
+- **1.4.1** — Map clicks now work in the strip beside the top bar. With `WorldFullHeight=1` the world was drawn up to the top edge, but the game still rejected clicks above the original top of the world view (an upper limit on the cursor's y before picking the terrain); that limit is now lifted when the world is drawn full height.
+- **1.4** — First public release.
+
 ## License
 
 W3TrueWidescreen is MIT licensed, see `LICENSE`. Author: [Hr0ffT](https://github.com/Hr0ffT).
