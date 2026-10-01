@@ -29,6 +29,7 @@ static int    g_enabled = 0;
 static FILE*  g_log = NULL;
 static int    g_logCount = 0;
 static int    g_debug = 0;        // Debug=1 in the ini: verbose log
+static int    g_fpsLimit = 0;     // FpsLimit: 0 = leave the frame rate alone (see InstallFpsLimit)
 static int    g_pathQuery = 1;    // AllowPathQuery: let other programs read the exe path (see ProtectProcess_hook)
 #define dlogf_(...) do { if (g_debug) logf_(__VA_ARGS__); } while (0)
 static int    g_checkedWindow = 0;
@@ -461,6 +462,8 @@ static double ReadAspect(char* src, size_t srcLen)
     g_fadeFix = GetPrivateProfileIntA(INI_SECTION, "FadeFix", 1, ini);
     g_debug = GetPrivateProfileIntA(INI_SECTION, "Debug", 0, ini);
     g_pathQuery = GetPrivateProfileIntA(INI_SECTION, "AllowPathQuery", 1, ini);
+    g_fpsLimit = GetPrivateProfileIntA(INI_SECTION, "FpsLimit", 0, ini);
+    if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_movieRenderer = GetPrivateProfileIntA(INI_SECTION, "MovieRenderer", 1, ini);
     g_movieNative = GetPrivateProfileIntA(INI_SECTION, "MovieNativeMode", 1, ini);
     g_movieFullWin = GetPrivateProfileIntA(INI_SECTION, "MovieFullWindow", 1, ini);
@@ -1322,6 +1325,84 @@ static void InstallPathQuery(void)
     ProtectProcess_hook();
 }
 
+// ---- frame rate limit. The engine draws a frame whenever GetTickCount() changes (0x62D710 fires the game tick
+//      and flags a render, 0x62D7D0 sends the render event 0x11). Windows moves that counter every 15.625 ms, which
+//      is where the classic 64 fps cap comes from: nothing in the game asks for 64, and its own 'maxfps' setting
+//      changes nothing. FpsLimit=N gives Game.dll a 1 ms GetTickCount (performance counter), keeps the tick gate
+//      on the real counter so the game tick and everything stepped per tick stay exactly as before, and raises
+//      the render flag on its own schedule, 1000/N ms apart. ----
+#define RVA_RenderEvent 0x62D7D0           // 53 57 8d 7e 10: push ebx; push edi; lea edi,[esi+10]
+u32 g_renderTr;
+static LARGE_INTEGER g_lastFrame; static double g_qpcToMs, g_minFrameMs;
+// GetTickCount itself only moves every 15.625 ms on current Windows, timeBeginPeriod or not, so give Game.dll a
+// 1 ms version: the system counter plus the performance counter's progress since we started. Never behind the
+// real counter, never going backwards; other modules keep calling the real one through their own import tables.
+#define IAT_GetTickCount 0x86D230
+typedef DWORD (WINAPI *GetTickCount_t)(void);
+static GetTickCount_t g_realGTC;
+static DWORD g_tickBase, g_lastHires; static LARGE_INTEGER g_qpcBase;
+#define RVA_TickGateRet 0x62D73A           // return address of the GetTickCount call in the tick gate 0x62D710
+static DWORD WINAPI GetTickCount_hires(void)
+{
+    // the tick gate (0x62D710) fires the game tick whenever this value changes: keep it on the real 15.625 ms
+    // counter so the tick rate (and everything stepped per tick) stays exactly as in the original game
+    if ((u32)__builtin_return_address(0) - g_base == RVA_TickGateRet) return g_realGTC();
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    DWORD v = g_tickBase + (DWORD)((double)(c.QuadPart - g_qpcBase.QuadPart) * g_qpcToMs);
+    DWORD real = g_realGTC();
+    if ((int)(v - real) < 0) v = real;
+    if ((int)(v - g_lastHires) < 0) v = g_lastHires;
+    g_lastHires = v;
+    return v;
+}
+static void InstallHiresTicks(void)
+{
+    u32 slot = g_base + IAT_GetTickCount;
+    g_realGTC = *(GetTickCount_t*)slot;
+    if (!g_realGTC) { logf_("fps limit: GetTickCount import not found"); return; }
+    g_tickBase = g_realGTC(); QueryPerformanceCounter(&g_qpcBase); g_lastHires = g_tickBase;
+    void* h = (void*)GetTickCount_hires; WriteMem(slot, &h, 4);
+    logf_("fps limit: 1 ms GetTickCount for Game.dll (base %lu)", g_tickBase);
+}
+static void RemoveHiresTicks(void)
+{
+    if (!g_realGTC) return;
+    void* r = (void*)g_realGTC; WriteMem(g_base + IAT_GetTickCount, &r, 4); g_realGTC = NULL;
+}
+__attribute__((used, cdecl)) void RenderGate(u32 self)
+{
+    // self = the frame object; bit 4 of +0x44 = "render pending", which the original dispatcher consumes.
+    // The tick sets it 64 times a second; we take it over: raise it on our schedule, drop it when too soon.
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    u32* flags = (u32*)(self + 0x44);
+    double el = g_lastFrame.QuadPart ? (double)(c.QuadPart - g_lastFrame.QuadPart) * g_qpcToMs : 1e9;
+    if (el >= g_minFrameMs) {
+        *flags |= 4;
+        if (el > 2.0 * g_minFrameMs) g_lastFrame = c;                       // way behind: resync
+        else g_lastFrame.QuadPart += (LONGLONG)(g_minFrameMs / g_qpcToMs); // on time: step without drift
+    } else *flags &= ~4u;
+}
+static void __attribute__((naked)) RenderEvent_det(void)
+{
+    asm volatile(
+        "pushal\n" "push %%esi\n" "call _RenderGate\n" "add $4, %%esp\n" "popal\n"
+        "jmp *_g_renderTr\n" ::: "memory");
+}
+static void InstallFpsLimit(void)
+{
+    if (!g_fpsLimit) return;
+    u32 a = g_base + RVA_RenderEvent;
+    if (memcmp((void*)a, "\x53\x57\x8d\x7e\x10", 5) != 0) { logf_("fps limit: render event code not recognised, off"); return; }
+    LARGE_INTEGER f; if (!QueryPerformanceFrequency(&f) || !f.QuadPart) { logf_("fps limit: no performance counter, off"); return; }
+    g_qpcToMs = 1000.0 / (double)f.QuadPart;
+    g_minFrameMs = 1000.0 / (double)g_fpsLimit;
+    g_renderTr = MakeTrampoline(a, 5);
+    if (!g_renderTr) { logf_("fps limit: trampoline failed, off"); return; }
+    WriteJmp(a, (u32)RenderEvent_det);
+    InstallHiresTicks();
+    logf_("fps limit: %d fps (min frame %.3f ms)", g_fpsLimit, g_minFrameMs);
+}
+
 static void Install(void)
 {
     char path[MAX_PATH]; GetModuleFileNameA(NULL, path, MAX_PATH);
@@ -1331,7 +1412,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.4.1  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.5  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
@@ -1395,6 +1476,7 @@ static void Install(void)
     InstallMovieNative();
     InstallMovieRenderer();
     InstallExternalPlayer(g_moviePlayerOpt);
+    InstallFpsLimit();
     g_enabled = 1;
     logf_("active");
 }
@@ -1402,6 +1484,7 @@ static void Install(void)
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
 {
     (void)h; (void)r;
+    if (reason == DLL_PROCESS_DETACH) RemoveHiresTicks();
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
         Install();

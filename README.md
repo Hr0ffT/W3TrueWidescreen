@@ -51,6 +51,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `MovieSuperRes` | 1 | NVIDIA RTX Video super resolution for the movies |
 | `MoviePlayer` | 0 | Play movies in an external player: 1 = MPC-HC, or the path to the player's exe |
 | `AllowPathQuery` | 1 | Let other programs read the game's exe path, so NVIDIA App keeps its per-game settings (0 = original lock) |
+| `FpsLimit` | 0 | Frame rate limit, e.g. 144 for a 144 Hz monitor (0 = the game's usual 64 fps). The game logic is not touched, see below |
 | `Width` / `Height` | — | Force an aspect if the one from the video settings is wrong |
 | `Debug` | 0 | Detailed log for bug reports |
 
@@ -62,6 +63,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 - `WARNING: window is ...`: the window size does not match the resolution in the settings. Set `Width`/`Height` in the ini.
 - `aspect is 4:3 or narrower`: nothing to do on a 4:3 screen.
 - `movies: ...`: what the movie renderer did. If the movies misbehave, set `MovieRenderer=0` to fall back to the Windows renderer.
+- `/fps` in the game chat shows less than `FpsLimit`: the game is hitting the monitor's refresh rate (vsync) or the GPU, not the limit. Set `FpsLimit` to the monitor's refresh rate.
 
 ## Compatibility notes
 
@@ -81,8 +83,11 @@ i686-w64-mingw32-gcc -O2 -Wall -shared -static-libgcc -s -o W3TrueWidescreen.mix
 
 The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to the monitor. The mod widens that space to `0.6 × aspect` and re-anchors the frames: the console to the centred 4:3 area, the menus to the edges. It then rebuilds the world and menu projection so the vertical field of view matches 4:3. The campaign fade model is read from the game archives, stretched to the screen width and cached in `W3TrueWidescreen_cache`. For the movies it skips the game's display mode switch and gamma ramp and, when the `W3TrueWidescreen` folder is present, builds the DirectShow graph from LAV Filters and MPC Video Renderer.
 
+**Why the game runs at 64 fps.** The engine draws a frame whenever `GetTickCount()` returns a new value, and Windows updates that counter every 15.625 ms: 1000 / 15.625 = 64. Nothing in the game asks for 64, and its own `maxfps` setting changes nothing. `FpsLimit` gives the game a 1 ms version of that counter (from the performance counter), keeps the game tick on the real counter so the simulation, timers and everything stepped per tick run exactly as before, and raises the "draw a frame" flag on its own schedule, `1000 / FpsLimit` ms apart. Only rendering changes; a game hour still takes the same 20 real seconds.
+
 ## Changelog
 
+- **1.5** — `FpsLimit`: a frame rate limit above the engine's 64 fps, e.g. 144 for a 144 Hz monitor (0 = unchanged). Game logic, timers and animations stepped per tick are untouched; see "How it works".
 - **1.4.1** — Map clicks now work in the strip beside the top bar. With `WorldFullHeight=1` the world was drawn up to the top edge, but the game still rejected clicks above the original top of the world view (an upper limit on the cursor's y before picking the terrain); that limit is now lifted when the world is drawn full height.
 - **1.4** — First public release.
 
