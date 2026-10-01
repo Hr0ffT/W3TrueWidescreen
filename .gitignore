@@ -1,3 +1,6 @@
 # runtime / generated
 *.log
 /W3TrueWidescreen_cache/
+
+# local working notes
+/docs/
