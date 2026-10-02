@@ -26,6 +26,9 @@ static double g_uiW_d = 0.8;      // new UI width (double, used by UI<->screen c
 static float  g_uiW_f = 0.8f;     // new UI width (float, used by UI ortho projection)
 static float  g_e = 0.0f;         // horizontal shift for HUD frames = (W - 0.8) / 2
 static int    g_enabled = 0;
+static int    g_dotaOrig = 1;    // DotAOriginal=1: DracoL1ch's DotA Allstars maps run as without the mod (see SetDotAMode)
+static int    g_dotaMode = 0;    // 1 while such a map is loaded / played
+static int    g_dotaLoading = 0; // its loading screen is up: shown stretched over the whole screen
 static FILE*  g_log = NULL;
 static int    g_logCount = 0;
 static int    g_debug = 0;        // Debug=1 in the ini: verbose log
@@ -190,9 +193,11 @@ static void CheckWindowOnce(void)
 static int g_consoleBacking = 1;
 static int g_hpUnder = 1;         // HealthBarsUnderConsole=1: unit health bars drawn under the console panels   // ConsoleBacking=0: do not blacken the console area behind the world (diagnostics)
 
+static void DotAFrameEvent(u32 frame, u32 parent);
 static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 parent, u32 rel, float x, float y, u32 flag)
 {
     (void)edx;
+    if (g_dotaOrig) DotAFrameEvent(frame, parent);
     if (g_enabled && g_cineFull && x == 0.0f && y == 0.0f && point == rel && (point == 0 || point == 8) && VtRva(parent) == 0x93C794) {
         // CinematicTopBorder (TOPLEFT) / CinematicBottomBorder (BOTTOMRIGHT) are 0.8 wide and anchored at one
         // corner of the full-width cinematic panel: pin the opposite side too, so they span the whole width
@@ -272,6 +277,7 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
 static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 flag)
 {
     (void)edx;
+    if (g_dotaOrig) DotAFrameEvent(frame, parent);
     float dx = 0.0f;
     if (g_enabled) {
         int isUI = IsGameUIRoot(parent);
@@ -463,6 +469,7 @@ static double ReadAspect(char* src, size_t srcLen)
     g_debug = GetPrivateProfileIntA(INI_SECTION, "Debug", 0, ini);
     g_pathQuery = GetPrivateProfileIntA(INI_SECTION, "AllowPathQuery", 1, ini);
     g_fpsLimit = GetPrivateProfileIntA(INI_SECTION, "FpsLimit", 0, ini);
+    g_dotaOrig = GetPrivateProfileIntA(INI_SECTION, "DotAOriginal", 1, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_movieRenderer = GetPrivateProfileIntA(INI_SECTION, "MovieRenderer", 1, ini);
     g_movieNative = GetPrivateProfileIntA(INI_SECTION, "MovieNativeMode", 1, ini);
@@ -585,9 +592,174 @@ static int BuildFadeCache(HANDLE mpq, const char* name, DWORD scope)
     return ok;
 }
 
+
+// ---- DracoL1ch's DotA Allstars maps build their own interface with helper DLLs (DotAAllstarsHelper /
+//      WarCraftHelper): they place it for the original 0.8-wide screen, partly correct it for the screen width
+//      themselves and project the world with their own WideScreen option. With DotAOriginal=1 the mod steps aside
+//      while such a map runs: original interface width, no frame moves, world projection, health bar or frame
+//      rate changes. The map is recognised by its script naming the helper; the script is read during loading,
+//      seconds before the game interface is built. ----
+static double g_wideD; static float g_wideE, g_pickTopWide; static int g_barLevelPatched;
+static void SetDotAMode(int on)
+{
+    if (on == g_dotaMode || !g_wideD) return;
+    static const uint8_t lvlRaise = 0x01, lvlKeep = 0x00;
+    if (on) {
+        g_enabled = 0; g_dotaMode = 1;
+        g_uiW_d = 0.8; g_uiW_f = 0.8f; g_e = 0.0f; g_pickTop = 0.577f;
+        if (g_barLevelPatched) WriteMem(g_base + 0x379B5A, &lvlRaise, 1);
+        logf_("DotA Allstars map (DracoL1ch): mod off while it runs (DotAOriginal=1)");
+    } else {
+        g_uiW_d = g_wideD; g_uiW_f = (float)g_wideD; g_e = g_wideE; g_pickTop = g_pickTopWide;
+        if (g_barLevelPatched) WriteMem(g_base + 0x379B5A, &lvlKeep, 1);
+        g_dotaMode = 0; g_enabled = 1;
+        logf_("DotA Allstars map left: mod on again");
+    }
+}
+static int g_dotaGameSeen;
+static void DotAModeCheckExit(u32 parent)
+{
+    if (IsGameUIRoot(parent)) { g_dotaGameSeen = 1; return; }
+    u32 ui = g_gameUI;
+    int uiAlive = ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + RVA_GameUIVtbl;
+    if (g_dotaGameSeen && !uiAlive && IsScreenRoot(parent)) { g_dotaGameSeen = 0; SetDotAMode(0); }
+}
+// The script is also read when a map is only selected in the menus (lobby settings): remember the result and switch
+// when that map's loading screen (CLoading) is laid out; back to normal when its score screen (CScoreScreen)
+// appears, or at the menus if a game ends without one.
+static int g_dotaPending, g_loadingActive;
+static void SetDotAPending(int found)
+{
+    g_dotaPending = found;
+    if (found && g_loadingActive && !g_dotaMode) SetDotAMode(1);     // loading screen already up (map started directly)
+}
+static void DotAFrameEvent(u32 frame, u32 parent)
+{
+    u32 vt = VtRva(frame);
+    if (vt == 0x96662C) {                                            // CLoading
+        if (!g_loadingActive) logf_("loading screen (DotA map selected: %d)", g_dotaPending);
+        g_loadingActive = 1; g_dotaLoading = g_dotaPending;
+    } else if (vt == 0x967460) {                                     // CScoreScreen
+        g_loadingActive = 0; g_dotaLoading = 0;
+        if (g_dotaMode) SetDotAMode(0);
+    }
+    if (IsGameUIRoot(parent)) {
+        if (g_dotaPending && !g_dotaMode && g_loadingActive) { logf_("DotA map: switched at the game interface"); SetDotAMode(1); }
+        g_loadingActive = 0; g_dotaLoading = 0;
+    }
+    if (g_dotaMode) DotAModeCheckExit(parent);
+}
+static char g_loadModel[MAX_PATH];        // custom loading screen model of the selected DotA map (from war3map.w3i)
+static void ReadLoadingModel(HANDLE mpq, const char* scriptName, DWORD scope)
+{
+    char w3i[MAX_PATH]; lstrcpynA(w3i, scriptName, MAX_PATH);
+    char* b = strrchr(w3i, '\\'); b = b ? b + 1 : w3i;
+    strcpy(b, "war3map.w3i");
+    g_loadModel[0] = 0;
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, w3i, scope, &h) || !h) return;
+    DWORD n = S_Size(h, NULL), got = 0;
+    char* buf = (n > 0 && n < (1u << 20)) ? (char*)malloc(n + 1) : NULL;
+    if (buf && S_Read(h, buf, n, &got, NULL) && got == n) {
+        buf[n] = 0;
+        for (DWORD i = 0; i < n; ) {                        // first zero-terminated string ending in .mdx / .mdl
+            DWORD len = (DWORD)strnlen(buf + i, n - i);
+            if (len > 4 && len < MAX_PATH && (!_stricmp(buf + i + len - 4, ".mdx") || !_stricmp(buf + i + len - 4, ".mdl"))) {
+                DWORD st = i; for (DWORD k = i; k < i + len; k++) if ((unsigned char)buf[k] < 0x20 || (unsigned char)buf[k] > 0x7E) st = k + 1;   // the path follows binary fields
+                lstrcpynA(g_loadModel, buf + st, MAX_PATH); break;
+            }
+            i += len + 1;
+        }
+    }
+    free(buf); S_Close(h);
+    if (g_loadModel[0]) logf_("DotA map: loading screen model %s", g_loadModel);
+}
+static void CheckMapScript(HANDLE mpq, const char* name, DWORD scope)
+{
+    if (!g_dotaOrig || !g_wideD || !S_Read || !S_Size || !S_Close) return;
+    const char* b = strrchr(name, '\\'); b = b ? b + 1 : name;
+    if (!SameName(b, "war3map.j")) return;
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return;
+    DWORD n = S_Size(h, NULL), got = 0;
+    static DWORD lastSize; static int lastResult;
+    if (n && n == lastSize) { S_Close(h); SetDotAPending(lastResult); return; }   // the game opens it several times
+    char* buf = (n > 0 && n < (64u << 20)) ? (char*)malloc(n) : NULL;
+    int found = 0;
+    if (buf && S_Read(h, buf, n, &got, NULL) && got == n) {
+        static const char key[] = "DotAAllstarsHelper";
+        for (DWORD i = 0; i + sizeof key - 1 <= n && !found; i++)
+            if (buf[i] == 'D' && !memcmp(buf + i, key, sizeof key - 1)) found = 1;
+    }
+    free(buf); S_Close(h);
+    lastSize = n; lastResult = found;
+    if (found) ReadLoadingModel(mpq, name, scope);
+    SetDotAPending(found);
+}
+
+// stretch the vertex x of every geoset to the screen width; the model is drawn relative to the loading screen frame,
+// which stays in the centred 4:3 area, so also move it left by that area's offset
+static int StretchMdxVertices(uint8_t* d, DWORD n, float f, float off)
+{
+    if (n < 16 || memcmp(d, "MDLX", 4) != 0) return 0;
+    int changed = 0; DWORD p = 4;
+    while (p + 8 <= n) {
+        DWORD sz = *(DWORD*)(d + p + 4);
+        if (p + 8 + sz > n) return 0;
+        if (memcmp(d + p, "GEOS", 4) == 0) {
+            DWORD g = p + 8, end = p + 8 + sz;
+            while (g + 4 <= end) {
+                DWORD gsz = *(DWORD*)(d + g);
+                if (gsz < 12 || g + gsz > end) return 0;
+                if (memcmp(d + g + 4, "VRTX", 4) == 0) {
+                    DWORD cnt = *(DWORD*)(d + g + 8);
+                    if (12 + cnt * 12 > gsz) return 0;
+                    for (DWORD v = 0; v < cnt; v++) {
+                        float x; memcpy(&x, d + g + 12 + v * 12, 4);
+                        x = x * f - off; memcpy(d + g + 12 + v * 12, &x, 4); changed++;
+                    }
+                }
+                g += gsz;
+            }
+        }
+        p += 8 + sz;
+    }
+    return changed;
+}
+static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
+{
+    if (!g_dotaOrig || !g_dotaPending || !g_loadModel[0] || !SameName(name, g_loadModel)) return 0;
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return 0;
+    DWORD n = S_Size(h, NULL), got = 0;
+    uint8_t* buf = (n > 0 && n < (4u << 20)) ? (uint8_t*)malloc(n) : NULL;
+    int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
+    S_Close(h);
+    if (ok) ok = StretchMdxVertices(buf, n, (float)(g_wideD / 0.8), g_wideE) > 0;
+    static char path[MAX_PATH];
+    if (ok) {
+        char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
+        char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
+        strcat(dir, "W3TrueWidescreen_cache");
+        CreateDirectoryA(dir, NULL);
+        snprintf(path, sizeof path, "%s\\LoadingScreen-map.mdx", dir);
+        FILE* f = fopen(path, "wb");
+        ok = f && fwrite(buf, 1, n, f) == n;
+        if (f) fclose(f);
+    }
+    free(buf);
+    if (!ok) { logf_("DotA map: loading screen model not widened"); return 0; }
+    BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
+    if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
+    logf_("DotA map: loading screen stretched to the screen width (%d)", r);
+    return r;
+}
+
 static BOOL __stdcall SOpenEx_hook(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
-    if (g_fadeState >= 0 && name && ph && !IsBadStringPtrA(name, MAX_PATH) && SameName(name, kFadeName)) {
+    if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeWidenedLoading(mpq, name, scope, ph)) return TRUE;
+    if (name && ph && !IsBadStringPtrA(name, MAX_PATH)) CheckMapScript(mpq, name, scope);
+    if (g_fadeFix && g_fadeState >= 0 && name && ph && !IsBadStringPtrA(name, MAX_PATH) && SameName(name, kFadeName)) {
         if (g_fadeState == 0) {
             g_fadeState = BuildFadeCache(mpq, name, scope) ? 1 : -1;
             logf_(g_fadeState > 0 ? "campaign fade widened" : "campaign fade: could not build widened copy, using original");
@@ -607,7 +779,7 @@ static BOOL __stdcall SOpenEx_hook(HANDLE mpq, const char* name, DWORD scope, HA
 
 static void InstallFadeFix(void)
 {
-    if (!g_fadeFix) return;
+    if (!g_fadeFix && !g_dotaOrig) return;
     HMODULE st = GetModuleHandleA("Storm.dll");
     if (!st) return;
     u32 f = (u32)GetProcAddress(st, (LPCSTR)268);
@@ -1095,8 +1267,10 @@ static void PatchCallGamma(u32 at)     // call [SetDeviceGammaRamp]  ->  add esp
 //      panels are BACKGROUND, a health bar's fill is ARTWORK, so bars end up on top of the console. Create the
 //      fill of the unit bars (CStatBar) in the BACKGROUND layer too; only unit bars, console bars stay as they are.
 typedef int (__fastcall *SBSetTex_t)(u32 self, u32 edx, u32 a1, u32 a2);
+static int g_barLevelPatched;
 static int __fastcall StatBarSetTexture_wrap(u32 self, u32 edx, u32 a1, u32 a2)
 {
+    if (g_dotaMode) return ((SBSetTex_t)(g_base + 0x60E610))(self, edx, a1, a2);
     static const uint8_t bg = 0x00, art = 0x02;
     WriteMem(g_base + 0x60E692, &bg, 1);                  // CSimpleTexture(parent, layer 2 -> 0, ...)
     int r = ((SBSetTex_t)(g_base + 0x60E610))(self, edx, a1, a2);
@@ -1111,6 +1285,7 @@ typedef int  (__fastcall *FrameShow_t)(u32 self, u32 edx);
 typedef void (__fastcall *TopRegister_t)(u32 top, u32 edx, u32 frame, u32 level);
 static void BarsFirst(void)
 {
+    if (g_dotaMode) return;
     u32 top = *(u32*)(g_base + 0xACE758);                      // CSimpleTop
     if (!top || IsBadReadPtr((void*)top, 0x200)) return;
     u32 others[96]; int n = 0;
@@ -1167,7 +1342,7 @@ static void InstallHealthBarLayer(void)
     // right after creating a unit bar the game raises its frame level by one (0x379B58: add eax,1 before
     // SetFrameLevel) so that it is drawn after the top-level console: keep it at the console's level instead
     static const uint8_t kRaise[] = { 0x8B, 0x81, 0x84, 0x00, 0x00, 0x00, 0x83, 0xC0, 0x01 };
-    if (!memcmp((void*)(g_base + 0x379B52), kRaise, sizeof kRaise)) { static const uint8_t z = 0x00; WriteMem(g_base + 0x379B5A, &z, 1); }
+    if (!memcmp((void*)(g_base + 0x379B52), kRaise, sizeof kRaise)) { static const uint8_t z = 0x00; WriteMem(g_base + 0x379B5A, &z, 1); g_barLevelPatched = 1; }
     else logf_("health bar level code not recognised");
     u32 slot = g_base + 0x93E604 + 0x68;                        // CStatBar vtable: Show
     if (*(u32*)slot == g_base + 0x609B50 && !memcmp((void*)(g_base + 0x60C760), "\x56\x8b\xf1\x8b\x4c\x24\x08", 7)) {
@@ -1387,6 +1562,7 @@ __attribute__((used, cdecl)) void RenderGate(u32 self)
 {
     // self = the frame object; bit 4 of +0x44 = "render pending", which the original dispatcher consumes.
     // The tick sets it 64 times a second; we take it over: raise it on our schedule, drop it when too soon.
+    if (g_dotaMode) return;
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
     u32* flags = (u32*)(self + 0x44);
     double el = g_lastFrame.QuadPart ? (double)(c.QuadPart - g_lastFrame.QuadPart) * g_qpcToMs : 1e9;
@@ -1426,7 +1602,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.5.1  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.6  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
@@ -1491,6 +1667,7 @@ static void Install(void)
     InstallMovieRenderer();
     InstallExternalPlayer(g_moviePlayerOpt);
     InstallFpsLimit();
+    g_wideD = g_uiW_d; g_wideE = g_e; g_pickTopWide = g_pickTop;
     g_enabled = 1;
     logf_("active");
 }

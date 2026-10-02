@@ -53,6 +53,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `AllowPathQuery` | 1 | Let other programs read the game's exe path, so NVIDIA App keeps its per-game settings (0 = original lock) |
 | `FpsLimit` | 0 | Frame rate limit, e.g. 144 for a 144 Hz monitor (0 = the game's usual 64 fps). The game logic is not touched, see below |
 | `Width` / `Height` | — | Force an aspect if the one from the video settings is wrong |
+| `DotAOriginal` | 1 | DracoL1ch's DotA Allstars maps run as without the mod (use their own WideScreen option), see below |
 | `Debug` | 0 | Detailed log for bug reports |
 
 ## Troubleshooting
@@ -70,6 +71,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 - Tested on 3840×2160 (16:9). Other aspects are computed the same way, but they have seen less testing.
 - In-game cutscenes (rendered by the engine) keep the engine's look; only their letterbox is widened.
 - The mod does not change gameplay or network data, but use it at your own discretion online.
+- **DotA Allstars by DracoL1ch (7.0x)** builds its own interface with helper DLLs and has its own `WideScreen` option (in the map's settings) for the 3D view. With `DotAOriginal=1` the mod steps aside while such a map runs (menus, other maps and movies are unaffected) and only stretches the map's loading screen picture. With `DotAOriginal=0` the mod also works on these maps, but their interface is not adapted yet. These maps also hang when the game window is resized, with or without the mod.
 
 ## Building from source
 
@@ -87,6 +89,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.6** — `DotAOriginal`: DracoL1ch's DotA Allstars maps run as without the mod (they bring their own interface and WideScreen option); their loading screen picture is stretched to the screen width.
 - **1.5.1** — The movie renderer (MPC Video Renderer, LAV Filters) is loaded at the first movie instead of at startup. Loaded at startup, it made DracoL1ch's DotA Allstars 7.0x maps crash at hero selection (heap corruption).
 - **1.5** — `FpsLimit`: a frame rate limit above the engine's 64 fps, e.g. 144 for a 144 Hz monitor (0 = unchanged). Game logic, timers and animations stepped per tick are untouched; see "How it works".
 - **1.4.1** — Map clicks now work in the strip beside the top bar. With `WorldFullHeight=1` the world was drawn up to the top edge, but the game still rejected clicks above the original top of the world view (an upper limit on the cursor's y before picking the terrain); that limit is now lifted when the world is drawn full height.
