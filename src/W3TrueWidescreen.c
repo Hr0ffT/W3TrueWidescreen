@@ -33,7 +33,15 @@ static int    g_dotaRun = 0;     // such a map is being played with the mod on (
 static FILE*  g_log = NULL;
 static int    g_logCount = 0;
 static int    g_debug = 0;        // Debug=1 in the ini: verbose log
-static int    g_fpsLimit = 0;     // FpsLimit: 0 = leave the frame rate alone (see InstallFpsLimit)
+static int    g_fpsLimit = 0;
+static float  g_uiScale = 1.0f;   // UIScale (percent in the ini): size of the whole interface on screen
+static double g_uiH_d = 0.6;      // virtual UI screen height (0.6 / g_uiScale)
+static float  g_uiH_f = 0.6f;
+static float  g_f = 0.0f;
+static double g_aspect = 4.0 / 3.0;
+static int    g_scaleOn = 0, g_scaleGameSeen = 0;
+static u32    g_screenRoot = 0;
+static int    g_loadFull = 0;   // LoadingFullScreen=1: loading screen pictures stretched over the whole screen         // vertical shift for top-anchored absolute positions (g_uiH - 0.6)     // FpsLimit: 0 = leave the frame rate alone (see InstallFpsLimit)
 static int    g_pathQuery = 1;    // AllowPathQuery: let other programs read the exe path (see ProtectProcess_hook)
 #define dlogf_(...) do { if (g_debug) logf_(__VA_ARGS__); } while (0)
 static int    g_checkedWindow = 0;
@@ -105,7 +113,9 @@ static int IsScreenRoot(u32 parent)
     if (!parent || IsBadReadPtr((void*)parent, 4)) return 0;
     u32 vt = *(u32*)parent;
     if (!vt || IsBadReadPtr((void*)vt, 8)) return 0;
-    return *(u32*)(vt + 4) == g_base + RVA_ScreenRootSlot1;
+    if (*(u32*)(vt + 4) != g_base + RVA_ScreenRootSlot1) return 0;
+    g_screenRoot = parent;
+    return 1;
 }
 
 static u32 VtRva(u32 p)
@@ -209,6 +219,16 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         dlogf_("cinematic border %08X pinned to both sides (points %u,%u)", frame, point, other);
         return;
     }
+    if (g_enabled && g_scaleOn && VtRva(parent) == 0x96662C) {        // frames placed on the loading screen
+        float k = g_uiH_f / 0.6f;
+        if (point == 7 && rel == 7) y += 0.0025f * (k - 1.0f);           // LoadingBarText: on the bar, as the bar moves
+        else { x *= k; y *= k; }
+        if (point == 6 && rel == 6 && VtRva(frame) == 0x96E558) x += 0.4f * (k - 1.0f);   // LoadingBar (model)
+    }
+    if (g_enabled && g_f != 0.0f && point == 6 && rel == 6 && VtRva(frame) == 0x93FE38) {
+        y += g_f;
+        dlogf_("time of day indicator raised by %.4f", g_f);
+    }
     if (g_enabled) {
         int isUI = IsGameUIRoot(parent);
         if (isUI || (g_glue && IsScreenRoot(parent))) {
@@ -289,6 +309,7 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
         if (y > 0.5f && x < 0.06f) { }                    // top-left corner group: left screen edge
         else if (y > 0.5f && x > 0.7f) nx = x + 2 * g_e;   // top-right corner group: right screen edge
         else nx = x + g_e;                                // laid out around the 0.8-wide console
+        if (y > 0.55f) y += g_f;                          // top strip: follows the top edge; the rest stays with the console
     }
     // Unit health bars (CStatBar) follow their units anywhere on screen. With the world drawn behind the console,
     // units down there get bars too, and those are drawn on top of the console. In the original these units are
@@ -314,7 +335,7 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
             else if (x > R) x = R + hw;
             else hid = 1;                                       // mostly over it: its unit is under the console
         }
-        if (x > L && x < R && y > 0.6f + WORLD_T0) hid = 1;     // under the top bar
+        if (x > L && x < R && y > g_uiH_f + WORLD_T0) hid = 1;     // under the top bar
         if (hid) {
             static int n; if (n++ < 5) dlogf_("health bar under the console hidden (x %.3f y %.3f ret %06X)", x, y, ret);
             y = -1.0f;
@@ -345,9 +366,14 @@ static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 fla
         dxL = 2.0f * g_e; dxR = 2.0f * g_e;
         dlogf_("GlueSpriteLayerTopRight shifted by %.4f", dxL);
     }
+    float dyT = 0.0f, dyB = 0.0f;
+    if (g_enabled && g_scaleOn && VtRva(frame) == 0x96662C) {                 // CLoading: 0.8k x 0.6k, centred
+        float k = g_uiH_f / 0.6f;
+        dxL = (g_uiW_f - 0.8f * k) * 0.5f; dxR = -dxL;
+    }
     ClearAllPoints(frame, 0);
-    orig_SetFramePoint(frame, 0, 0, parent, 0, dxL, 0.0f, 0);
-    orig_SetFramePoint(frame, 0, 8, parent, 8, dxR, 0.0f, flag);
+    orig_SetFramePoint(frame, 0, 0, parent, 0, dxL, dyT, 0);
+    orig_SetFramePoint(frame, 0, 8, parent, 8, dxR, dyB, flag);
 }
 
 
@@ -363,6 +389,8 @@ static char g_moviePlayer[MAX_PATH];
 static int g_movieNative = 1;   // MovieNativeMode=1: no 800x600 mode switch and no gamma ramp for cinematics
 static int g_movieFullWin = 1;  // MovieFullWindow=1: renderer window covers the whole screen, letterbox drawn by the renderer
 static int g_movieHdr = 1, g_movieSuperRes = 1, g_movieSwap = 1, g_movieDetach = 1, g_movieReinit = 1, g_movieTexFmt = 10, g_movieVrDebug = 0;
+static int g_subBright = 100;    // MovieSubtitleBrightness: subtitle white level in percent
+static int g_subSize = 100;      // MovieSubtitleSize: movie subtitle size in percent (with the movie renderer)
 static int g_movieRenderer = 1; // MovieRenderer=1: play cinematics through W3TrueWidescreen\\MpcVideoRenderer.ax if present
      // FovFix=1: keep the original vertical field of view on wide screens
 // CameraZoomOut: >1 shows more of the map (world view only, cinematics untouched)
@@ -379,11 +407,12 @@ static void __fastcall Persp_hook(u32 out, u32 edx, float fovY, float aspect, fl
     MapWidescreenOptionPoll();
     const float W = g_uiW_f;
     const float H1 = 0.6f, H0 = 0.6f - WORLD_B0 + WORLD_T0;      // 0.45: original world view height
-    int isFull = fabsf(aspect - W / H1) < 4e-3f;                  // full screen (menus, world at full height)
-    int isNorm = fabsf(aspect - W / H0) < 4e-3f;                  // world view between the original strips
+    const float Hs = g_uiH_f;                                     // UI screen height (0.6 unless UIScale)
+    int isFull = fabsf(aspect - W / Hs) < 4e-3f;                  // full screen (menus, world at full height)
+    int isNorm = fabsf(aspect - W / (Hs - WORLD_B0 + WORLD_T0)) < 4e-3f;   // world view between the strips
     int inGame = (GetTickCount() - g_lastWorldTick) < 500;
     if (g_persLog < 30 && (inGame || g_persLog < 3)) { g_persLog++; dlogf_("persp fov=%.4f aspect=%.4f full=%d norm=%d inGame=%d ret=%06X", fovY, aspect, isFull, isNorm, inGame, (u32)__builtin_return_address(0) - g_base); }
-    if (!g_enabled || W < 0.8f + 1e-3f || (!isFull && !isNorm)) { orig_Persp(out, 0, fovY, aspect, zn, zf); return; }
+    if (!g_enabled || W < 0.8f * Hs / H1 + 1e-3f || (!isFull && !isNorm)) { orig_Persp(out, 0, fovY, aspect, zn, zf); return; }
     int worldDef = g_worldBottomDefault && g_worldTopDefault;
     float* m = (float*)out;
     if (inGame && isFull && g_worldFull && worldDef) {
@@ -453,7 +482,7 @@ static void DotATopBarFix(void)
             float x = *(float*)(po + 12), y = *(float*)(po + 16);
             if (y < 0.55f || y > 0.6f) continue;
             if (x < 0.1f || x > 0.65f) continue;
-            orig_SetAbsPoint(f, 0, 6, x + g_e, y, 1);   // an absolute point: not matched again until the map re-anchors the slot
+            orig_SetAbsPoint(f, 0, 6, x + g_e, y + g_f, 1);   // an absolute point: not matched again until the map re-anchors the slot
             static int n; if (g_debug && n++ < 40) dlogf_("top bar slot %08X moved %.4f -> %.4f", f, x, x + g_e);
         }
     }
@@ -489,8 +518,8 @@ static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
     // original, it must lie on black, not on the world
     if (g_cineFull && InCinematicMode()) { x1 = 0; x2 = W; }
     RECT8 rc[2] = {
-        { x1, (LONG)(H * (1.0f - WORLD_B0 / 0.6f)), x2, H },            // console band
-        { x1, 0, x2, (LONG)(H * (-WORLD_T0 / 0.6f) + 0.5f) }            // thin strip under the top bar
+        { x1, (LONG)(H * (1.0f - WORLD_B0 / g_uiH_f)), x2, H },            // console band
+        { x1, 0, x2, (LONG)(H * (-WORLD_T0 / g_uiH_f) + 0.5f) }            // thin strip under the top bar
     };
     ((Clear_t)vt[36])(dev, g_dotaRun ? 1 : 2, rc, 1 /*D3DCLEAR_TARGET*/, 0xFF000000, 1.0f, 0);   // DotA: own top bar
     // The 3D portraits (unit portrait in the console, speaker portrait of cinematics and transmissions) are
@@ -554,9 +583,17 @@ static double ReadAspect(char* src, size_t srcLen)
     g_debug = GetPrivateProfileIntA(INI_SECTION, "Debug", 0, ini);
     g_pathQuery = GetPrivateProfileIntA(INI_SECTION, "AllowPathQuery", 1, ini);
     g_fpsLimit = GetPrivateProfileIntA(INI_SECTION, "FpsLimit", 0, ini);
+    g_loadFull = GetPrivateProfileIntA(INI_SECTION, "LoadingFullScreen", 0, ini);
+    { int pct = GetPrivateProfileIntA(INI_SECTION, "UIScale", 100, ini); if (pct < 50) pct = 50; if (pct > 150) pct = 150; g_uiScale = pct / 100.0f; }
     g_dotaOrig = GetPrivateProfileIntA(INI_SECTION, "DotAOriginal", 0, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_movieRenderer = GetPrivateProfileIntA(INI_SECTION, "MovieRenderer", 1, ini);
+    g_subSize = GetPrivateProfileIntA(INI_SECTION, "MovieSubtitleSize", 100, ini);
+    if (g_subSize < 25) g_subSize = 25;
+    if (g_subSize > 400) g_subSize = 400;
+    g_subBright = GetPrivateProfileIntA(INI_SECTION, "MovieSubtitleBrightness", 100, ini);
+    if (g_subBright < 10) g_subBright = 10;
+    if (g_subBright > 100) g_subBright = 100;
     g_movieNative = GetPrivateProfileIntA(INI_SECTION, "MovieNativeMode", 1, ini);
     g_movieFullWin = GetPrivateProfileIntA(INI_SECTION, "MovieFullWindow", 1, ini);
     GetPrivateProfileStringA(INI_SECTION, "MoviePlayer", "0", g_moviePlayerOpt, sizeof g_moviePlayerOpt, ini);
@@ -691,11 +728,12 @@ static void SetDotAMode(int on)
     static const uint8_t lvlRaise = 0x01, lvlKeep = 0x00;
     if (on) {
         g_enabled = 0; g_dotaMode = 1;
-        g_uiW_d = 0.8; g_uiW_f = 0.8f; g_e = 0.0f; g_pickTop = 0.577f;
+        g_uiW_d = 0.8; g_uiW_f = 0.8f; g_e = 0.0f; g_pickTop = 0.577f; g_uiH_d = 0.6; g_uiH_f = 0.6f; g_f = 0.0f;
         if (g_barLevelPatched) WriteMem(g_base + 0x379B5A, &lvlRaise, 1);
         logf_("DotA Allstars map (DracoL1ch): mod off while it runs (DotAOriginal=1)");
     } else {
         g_uiW_d = g_wideD; g_uiW_f = (float)g_wideD; g_e = g_wideE; g_pickTop = g_pickTopWide;
+        g_uiH_d = 0.6; g_uiH_f = 0.6f; g_f = 0.0f;
         if (g_barLevelPatched) WriteMem(g_base + 0x379B5A, &lvlKeep, 1);
         g_dotaMode = 0; g_enabled = 1;
         logf_("DotA Allstars map left: mod on again");
@@ -744,6 +782,22 @@ static void SetDotARun(int on)
     MapWidescreenOption(on);
     logf_(on ? "DotA Allstars map with the mod on (DotAOriginal=0)" : "DotA Allstars map left");
 }
+static void SetUIScaleActive(int on)
+{
+    if (g_uiScale == 1.0f || on == g_scaleOn || (on && (g_dotaMode || !g_enabled))) return;
+    g_scaleOn = on;
+    g_uiH_d = on ? 0.6 / g_uiScale : 0.6; g_uiH_f = (float)g_uiH_d; g_f = (float)(g_uiH_d - 0.6);
+    g_uiW_d = g_uiH_d * g_aspect; g_uiW_f = (float)g_uiW_d; g_e = (float)((g_uiW_d - 0.8) * 0.5);
+    if (!on) g_scaleGameSeen = 0;
+    logf_("UI scale %s: screen %.4f x %.4f", on ? "on" : "off", g_uiW_d, g_uiH_d);
+    u32 r = g_screenRoot;
+    if (r && !IsBadReadPtr((void*)r, 0x60)) {
+        typedef void (__fastcall *SetSize_t)(u32 self, u32 edx, float v);
+        ((SetSize_t)(g_base + 0x605D90))(r, 0, g_uiW_f);
+        ((SetSize_t)(g_base + 0x605DB0))(r, 0, g_uiH_f);
+    }
+
+}
 static void DotAModeCheckExit(u32 parent)
 {
     if (IsGameUIRoot(parent)) { g_dotaGameSeen = 1; return; }
@@ -763,13 +817,22 @@ static void SetDotAPending(int found)
 static void DotAFrameEvent(u32 frame, u32 parent)
 {
     u32 vt = VtRva(frame);
-    if (vt == 0x96662C) {                                            // CLoading
+    if (vt == 0x96662C || VtRva(parent) == 0x96662C) {               // CLoading (or a frame placed on it)
         if (!g_loadingActive) logf_("loading screen (DotA map selected: %d)", g_dotaPending);
+        if (!g_scaleOn && !(g_dotaPending && g_dotaOrig)) SetUIScaleActive(1);
         g_loadingActive = 1; g_dotaLoading = g_dotaPending;
     } else if (vt == 0x967460) {                                     // CScoreScreen
         g_loadingActive = 0; g_dotaLoading = 0;
         if (g_dotaMode) SetDotAMode(0);
         if (g_dotaRun) SetDotARun(0);
+    }
+    if (vt == 0x967460) SetUIScaleActive(0);
+    if (g_scaleOn) {
+        if (IsGameUIRoot(parent)) g_scaleGameSeen = 1;
+        else if (g_scaleGameSeen && !g_loadingActive && IsScreenRoot(parent)) {
+            u32 ui = g_gameUI;
+            if (!(ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + RVA_GameUIVtbl)) SetUIScaleActive(0);
+        }
     }
     if (IsGameUIRoot(parent)) {
         if (g_dotaPending && !g_dotaMode && !g_dotaRun && g_loadingActive) {
@@ -803,7 +866,7 @@ static void ReadLoadingModel(HANDLE mpq, const char* scriptName, DWORD scope)
         }
     }
     free(buf); S_Close(h);
-    if (g_loadModel[0]) logf_("DotA map: loading screen model %s", g_loadModel);
+    if (g_loadModel[0]) dlogf_("map loading screen model %s", g_loadModel);
 }
 static void CheckMapScript(HANDLE mpq, const char* name, DWORD scope)
 {
@@ -824,13 +887,13 @@ static void CheckMapScript(HANDLE mpq, const char* name, DWORD scope)
     }
     free(buf); S_Close(h);
     lastSize = n; lastResult = found;
-    if (found) ReadLoadingModel(mpq, name, scope);
+    ReadLoadingModel(mpq, name, scope);
     SetDotAPending(found);
 }
 
 // stretch the vertex x of every geoset to the screen width; the model is drawn relative to the loading screen frame,
 // which stays in the centred 4:3 area, so also move it left by that area's offset
-static int StretchMdxVertices(uint8_t* d, DWORD n, float f, float off)
+static int StretchMdxVertices(uint8_t* d, DWORD n, float fx, float fy, float k)
 {
     if (n < 16 || memcmp(d, "MDLX", 4) != 0) return 0;
     int changed = 0; DWORD p = 4;
@@ -846,8 +909,9 @@ static int StretchMdxVertices(uint8_t* d, DWORD n, float f, float off)
                     DWORD cnt = *(DWORD*)(d + g + 8);
                     if (12 + cnt * 12 > gsz) return 0;
                     for (DWORD v = 0; v < cnt; v++) {
-                        float x; memcpy(&x, d + g + 12 + v * 12, 4);
-                        x = x * f - off; memcpy(d + g + 12 + v * 12, &x, 4); changed++;
+                        float xy[2]; memcpy(xy, d + g + 12 + v * 12, 8);
+                        xy[0] = (xy[0] - 0.4f) * fx + 0.4f * k; xy[1] = (xy[1] - 0.3f) * fy + 0.3f * k;
+                        memcpy(d + g + 12 + v * 12, xy, 8); changed++;
                     }
                 }
                 g += gsz;
@@ -857,32 +921,129 @@ static int StretchMdxVertices(uint8_t* d, DWORD n, float f, float off)
     }
     return changed;
 }
+
+// copy the geosets that touch the left (x = 0) or right (x = 0.8) edge of the 0.8-wide model and lay the copies over
+// [-e, 0] / [0.8, 0.8 + e], textured with the outer `strip` (0..1) of their texture
+static uint8_t* AddSideGeosets(const uint8_t* d, DWORD n, float e, float strip, DWORD* outN)
+{
+    if (n < 16 || memcmp(d, "MDLX", 4)) return NULL;
+    DWORD p = 4, gp = 0, gsz = 0;
+    while (p + 8 <= n) { DWORD sz = *(DWORD*)(d + p + 4); if (!memcmp(d + p, "GEOS", 4)) { gp = p; gsz = sz; break; } p += 8 + sz; }
+    if (!gp || gp + 8 + gsz > n) return NULL;
+    uint8_t* extra = (uint8_t*)malloc(gsz * 2 + 16); DWORD en = 0;
+    for (DWORD g = gp + 8; g + 4 <= gp + 8 + gsz; ) {
+        DWORD sz = *(DWORD*)(d + g);
+        if (sz < 12 || g + sz > gp + 8 + gsz) { free(extra); return NULL; }
+        // find VRTX and UVBS
+        DWORD vrtx = 0, uvbs = 0, cnt = 0;
+        for (DWORD q = g + 4; q + 8 <= g + sz; ) {
+            const uint8_t* t = d + q; DWORD k = *(DWORD*)(t + 4);
+            if (!memcmp(t, "VRTX", 4)) { vrtx = q; cnt = k; q += 8 + k * 12; }
+            else if (!memcmp(t, "NRMS", 4)) q += 8 + k * 12;
+            else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + k * 4;
+            else if (!memcmp(t, "PVTX", 4)) q += 8 + k * 2;
+            else if (!memcmp(t, "GNDX", 4)) q += 8 + k;
+            else if (!memcmp(t, "MATS", 4)) { q += 8 + k * 4 + 12 + 28; DWORD na = *(DWORD*)(d + q); q += 4 + na * 28; }
+            else if (!memcmp(t, "UVAS", 4)) q += 8;
+            else if (!memcmp(t, "UVBS", 4)) { uvbs = q; q += 8 + k * 8; }
+            else break;
+        }
+        if (vrtx && uvbs && cnt && *(DWORD*)(d + uvbs + 4) == cnt) {
+            float mn = 1e9f, mx = -1e9f;
+            for (DWORD v = 0; v < cnt; v++) { float x = *(float*)(d + vrtx + 8 + v * 12); if (x < mn) mn = x; if (x > mx) mx = x; }
+            float ymx = -1e9f, zmx = 0.0f;
+            for (DWORD v = 0; v < cnt; v++) { float y = *(float*)(d + vrtx + 8 + v * 12 + 4), z = *(float*)(d + vrtx + 8 + v * 12 + 8); if (y > ymx) ymx = y; if (fabsf(z) > zmx) zmx = fabsf(z); }
+            int left = fabsf(mn) < 1e-4f && mx <= 0.4001f, right = fabsf(mx - 0.8f) < 1e-4f && mn >= 0.3999f;
+            if ((left || right) && zmx < 1e-4f && fabsf(ymx - 0.6f) < 1e-4f && cnt == 4) {   // the two upper tiles
+                memcpy(extra + en, d + g, sz);
+                uint8_t* c = extra + en;
+                for (DWORD v = 0; v < cnt; v++) {
+                    float* x = (float*)(c + (vrtx - g) + 8 + v * 12);
+                    float* y = x + 1;
+                    float* u = (float*)(c + (uvbs - g) + 8 + v * 8);
+                    int outer = left ? *x < 0.2f : *x > 0.6f, top = *y > 0.4f;
+                    if (left) *x = outer ? -e : 0.0f; else *x = outer ? 0.8f + e : 0.8f;
+                    *y = top ? 0.6f : 0.0f;
+                    u[0] = outer ? strip : strip + 0.02f;               // a speck of the wood bar on top
+                    u[1] = top ? 0.06f : 0.08f;
+                }
+                en += sz;
+            }
+        }
+        g += sz;
+    }
+    if (!en) { free(extra); return NULL; }
+    uint8_t* o = (uint8_t*)malloc(n + en);
+    DWORD end = gp + 8 + gsz;
+    memcpy(o, d, end); memcpy(o + end, extra, en); memcpy(o + end + en, d + end, n - end);
+    *(DWORD*)(o + gp + 4) = gsz + en;
+    free(extra);
+    *outN = n + en;
+    return o;
+}
+static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
+{
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return 0;
+    DWORD n = S_Size(h, NULL), got = 0, on = 0;
+    uint8_t* buf = (n > 0 && n < (1u << 20)) ? (uint8_t*)malloc(n) : NULL;
+    int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
+    S_Close(h);
+    uint8_t* o = ok ? AddSideGeosets(buf, n, (float)((0.6 * g_aspect - 0.8) * 0.5), 0.10f, &on) : NULL;
+    free(buf);
+    if (!o) { logf_("score screen background not adapted"); return 0; }
+    static char path[MAX_PATH];
+    char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
+    char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
+    strcat(dir, "W3TrueWidescreen_cache"); CreateDirectoryA(dir, NULL);
+    snprintf(path, sizeof path, "%s\\ScoreScreen-Background.mdx", dir);
+    FILE* f = fopen(path, "wb"); ok = f && fwrite(o, 1, on, f) == on; if (f) fclose(f);
+    free(o);
+    if (!ok) return 0;
+    BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
+    if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
+    logf_("score screen background: sides covered (%d)", r);
+    return r;
+}
 static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
-    if (!g_dotaPending || !g_loadModel[0] || !SameName(name, g_loadModel)) return 0;
+    if (g_loadFull && g_aspect > 1.34 && SameName(name, "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\ScoreScreen-Background.mdx"))
+        return ServeScoreBackground(mpq, name, scope, ph);
+    int dota = g_dotaPending && g_loadModel[0] && SameName(name, g_loadModel);
+    int custom = !dota && g_loadModel[0] && SameName(name, g_loadModel);
+    static const char kBg[] = "UI\\Glues\\Loading\\Backgrounds\\", kGen[] = "UI\\Glues\\Loading\\Load-Generic\\";
+    int stock = !_strnicmp(name, kBg, sizeof kBg - 1) || !_strnicmp(name, kGen, sizeof kGen - 1);
+    size_t nl = strlen(name);
+    if (nl < 4 || (_stricmp(name + nl - 4, ".mdx") && _stricmp(name + nl - 4, ".mdl"))) return 0;
+    if (!dota && !custom && !stock) return 0;
+    double H = (g_dotaPending && g_dotaOrig) ? 0.6 : 0.6 / g_uiScale, W = H * g_aspect;   // the screen while loading
+    float fy = (float)(H / 0.6), fx = fy;                    // fill the height, keep the picture's shape
+    if (dota || g_loadFull) fx = (float)(W / 0.8);           // fill the whole screen
+    if (fx == 1.0f && fy == 1.0f) return 0;
     HANDLE h = 0;
     if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return 0;
     DWORD n = S_Size(h, NULL), got = 0;
     uint8_t* buf = (n > 0 && n < (4u << 20)) ? (uint8_t*)malloc(n) : NULL;
     int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
     S_Close(h);
-    if (ok) ok = StretchMdxVertices(buf, n, (float)(g_wideD / 0.8), g_wideE) > 0;
+    if (ok) ok = StretchMdxVertices(buf, n, fx, fy, fy) > 0;
     static char path[MAX_PATH];
     if (ok) {
         char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
         char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
         strcat(dir, "W3TrueWidescreen_cache");
         CreateDirectoryA(dir, NULL);
-        snprintf(path, sizeof path, "%s\\LoadingScreen-map.mdx", dir);
+        const char* bn = strrchr(name, '\\'); bn = bn ? bn + 1 : name;
+        snprintf(path, sizeof path, "%s\\Loading-%s", dir, bn);
         FILE* f = fopen(path, "wb");
         ok = f && fwrite(buf, 1, n, f) == n;
         if (f) fclose(f);
     }
     free(buf);
-    if (!ok) { logf_("DotA map: loading screen model not widened"); return 0; }
+    if (!ok) { logf_("loading screen model %s not adapted", name); return 0; }
     BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
     if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
-    logf_("DotA map: loading screen stretched to the screen width (%d)", r);
+    logf_("loading screen %s scaled %.3f x %.3f (%d)", name, fx, fy, r);
     return r;
 }
 
@@ -1102,6 +1263,158 @@ static void LogGraph(void* anyGraphItf)
     }
     ((Release_t)VTBL(fg)[2])(fg);
 }
+
+// ---- subtitles inside the video: XySubFilter interfaces (SubRenderIntf.h) ----
+static const GUID kIID_SubRenderConsumer = {0x9DF90966,0xFE9F,0x4F0E,{0x88,0x1E,0xDA,0xF8,0xA5,0x72,0xD9,0x00}};
+typedef struct { void** vt; } ComObj;
+static void* g_subConsumer;                 // MPC VR's ISubRenderConsumer
+static int g_subW, g_subH;                   // output rect of our frames (the renderer window)
+static uint32_t* g_subPix; static int g_subBw, g_subBh, g_subBx, g_subBy; static ULONGLONG g_subId = 1;
+static HRESULT __stdcall Sub_QI(ComObj* t, REFIID r, void** o)
+{
+    *o = t; return S_OK;                     // one interface per object; callers only ask for what it is
+}
+static ULONG __stdcall Sub_AddRef(ComObj* t) { (void)t; return 2; }
+static ULONG __stdcall Sub_Release(ComObj* t) { (void)t; return 1; }
+static HRESULT __stdcall Sub_GetNI(ComObj* t, LPCSTR f, void* v) { (void)t; (void)v; static int n; if (n++ < 40) dlogf_("subs: provider Get %s", f); return E_NOTIMPL; }
+static HRESULT __stdcall Sub_GetNI3(ComObj* t, LPCSTR f, void* v, int* c) { (void)t; (void)v; (void)c; static int n; if (n++ < 40) dlogf_("subs: provider Get %s", f); return E_NOTIMPL; }
+static HRESULT __stdcall Sub_GetString(ComObj* t, LPCSTR f, LPWSTR* v, int* c)
+{
+    (void)t;
+    const WCHAR* s = !strcmp(f, "name") ? L"W3TrueWidescreen" : !strcmp(f, "version") ? L"1.8" : !strcmp(f, "yuvMatrix") ? L"None" : NULL;
+    if (!s) { static int n; if (n++ < 40) dlogf_("subs: provider GetString %s", f); return E_NOTIMPL; }
+    int len = lstrlenW(s);
+    *v = (LPWSTR)LocalAlloc(0, (len + 1) * sizeof(WCHAR)); if (!*v) return E_OUTOFMEMORY;
+    lstrcpyW(*v, s); if (c) *c = len;
+    return S_OK;
+}
+static HRESULT __stdcall Sub_GetBool(ComObj* t, LPCSTR f, uint8_t* v)
+{
+    (void)t;
+    if (!strcmp(f, "combineBitmaps")) { *v = 0; return S_OK; }
+    if (!strcmp(f, "isMovable")) { *v = 1; return S_OK; }
+    static int n; if (n++ < 40) dlogf_("subs: provider GetBool %s", f); return E_NOTIMPL;
+}
+static HRESULT __stdcall Sub_Set4(ComObj* t, LPCSTR f, DWORD a) { (void)t; (void)a; dlogf_("subs: provider Set %s", f); return S_OK; }
+static HRESULT __stdcall Sub_Set8(ComObj* t, LPCSTR f, DWORD a, DWORD b) { (void)t; (void)a; (void)b; dlogf_("subs: provider Set %s", f); return S_OK; }
+static HRESULT __stdcall Sub_Set16(ComObj* t, LPCSTR f, DWORD a, DWORD b, DWORD c, DWORD d) { (void)t; (void)a; (void)b; (void)c; (void)d; dlogf_("subs: provider Set %s", f); return S_OK; }
+// frame
+static HRESULT __stdcall Frm_Rect(ComObj* t, RECT* r) { (void)t; if (!r) return E_POINTER; r->left = 0; r->top = 0; r->right = g_subW; r->bottom = g_subH; return S_OK; }
+static HRESULT __stdcall Frm_Count(ComObj* t, int* c) { (void)t; if (!c) return E_POINTER; *c = g_subPix ? 1 : 0; return S_OK; }
+static HRESULT __stdcall Frm_Bitmap(ComObj* t, int i, ULONGLONG* id, POINT* pos, SIZE* sz, LPCVOID* px, int* pitch)
+{
+    (void)t;
+    if (i != 0 || !g_subPix) return E_INVALIDARG;
+    if (id) *id = g_subId;
+    if (pos) { pos->x = g_subBx; pos->y = g_subBy; }
+    if (sz) { sz->cx = g_subBw; sz->cy = g_subBh; }
+    if (px) *px = g_subPix;
+    if (pitch) *pitch = g_subBw * 4;
+    static int n; if (n++ < 5) dlogf_("subs: bitmap asked (%p %p %p %p %p)", id, pos, sz, px, pitch);
+    return S_OK;
+}
+static void* kFrameVt[] = { Sub_QI, Sub_AddRef, Sub_Release, Frm_Rect, Frm_Rect, Frm_Count, Frm_Bitmap };
+static ComObj g_subFrame = { kFrameVt };
+static void SubUpdate(void);
+typedef HRESULT (__stdcall *Deliver_t)(void*, LONGLONG, LONGLONG, LPVOID, void*);
+static HRESULT __stdcall Prov_Request(ComObj* t, LONGLONG a, LONGLONG b, LPVOID ctx)
+{
+    (void)t;
+    static int n; if (n++ < 3) dlogf_("subs: frame requested %lld..%lld", a, b);
+    SubUpdate();
+    void* c = g_subConsumer;
+    if (!c) return E_FAIL;
+    return ((Deliver_t)VTBL(c)[22])(c, a, b, ctx, &g_subFrame);
+}
+static HRESULT __stdcall Prov_Disconnect(ComObj* t) { (void)t; dlogf_("subs: provider disconnected"); g_subConsumer = NULL; return S_OK; }
+static void* kProvVt[] = { Sub_QI, Sub_AddRef, Sub_Release,
+    Sub_GetBool, Sub_GetNI, Sub_GetNI, Sub_GetNI, Sub_GetNI, Sub_GetNI, Sub_GetString, Sub_GetNI3,
+    Sub_Set4, Sub_Set4, Sub_Set8, Sub_Set16, Sub_Set8, Sub_Set8, Sub_Set8, Sub_Set8,
+    Prov_Request, Prov_Disconnect };
+static ComObj g_subProvider = { kProvVt };
+// test bitmap: one line of white text with a black outline, premultiplied ARGB
+#define SUB_MAXL 6
+static void SubRenderLines(const WCHAR** lines, int nl)
+{
+    int W = g_subW, H = g_subH; if (W <= 0 || H <= 0) return;
+    if (nl <= 0) { g_subPix = NULL; return; }
+    HDC dc = CreateCompatibleDC(NULL);
+    HFONT font = CreateFontW(-(int)(H / 44.0 * g_subSize / 100.0), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Arial");
+    HGDIOBJ of = SelectObject(dc, font);
+    TEXTMETRICW tm; GetTextMetricsW(dc, &tm);
+    int lh = tm.tmHeight + tm.tmExternalLeading, maxw = 0;
+    for (int i = 0; i < nl; i++) { SIZE ts; GetTextExtentPoint32W(dc, lines[i], lstrlenW(lines[i]), &ts); if (ts.cx > maxw) maxw = ts.cx; }
+    int bw = maxw + 16, bh = lh * nl + 16;
+    BITMAPINFO bi = { { sizeof(BITMAPINFOHEADER), bw, -bh, 1, 32, BI_RGB } };
+    void* bits = NULL; HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HGDIOBJ ob = SelectObject(dc, bm);
+    uint8_t* outline = (uint8_t*)calloc(bw * bh, 1); uint8_t* fill = (uint8_t*)calloc(bw * bh, 1);
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+    for (int pass = 0; pass < 2; pass++) {
+        memset(bits, 0, bw * bh * 4);
+        SetTextAlign(dc, TA_CENTER | TA_TOP);
+        for (int l = 0; l < nl; l++) {
+            int y = 8 + l * lh, x = bw / 2, len = lstrlenW(lines[l]);
+            if (pass == 0) { for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) TextOutW(dc, x + dx, y + dy, lines[l], len); }
+            else TextOutW(dc, x, y, lines[l], len);
+        }
+        GdiFlush();
+        uint8_t* dst = pass ? fill : outline;
+        for (int i = 0; i < bw * bh; i++) dst[i] = ((uint8_t*)bits)[i * 4 + 1];
+    }
+    uint32_t* px = (uint32_t*)malloc(bw * bh * 4);
+    for (int i = 0; i < bw * bh; i++) {
+        uint32_t a = outline[i] > fill[i] ? outline[i] : fill[i], c = fill[i];
+        c = c * (uint32_t)g_subBright / 100;
+        px[i] = (a << 24) | (c << 16) | (c << 8) | c;                       // premultiplied: white * fill
+    }
+    free(outline); free(fill);
+    SelectObject(dc, ob); DeleteObject(bm); SelectObject(dc, of); DeleteObject(font); DeleteDC(dc);
+    static uint32_t* prev[2]; free(prev[1]); prev[1] = prev[0]; prev[0] = px;  // the renderer may still read the last one
+    int y0 = *(int*)(g_base + 0xACC088);                                       // under the picture, as the game draws them
+    g_subBw = bw; g_subBh = bh; g_subBx = (W - bw) / 2;
+    g_subBy = (y0 > 0 && y0 + bh < H) ? y0 + 8 : H - bh - H / 20;
+    g_subId++;
+    g_subPix = px;
+}
+static void SubUpdate(void)
+{
+    static WCHAR last[2048]; WCHAR cur[2048]; cur[0] = 0;
+    const WCHAR* lines[SUB_MAXL]; int nl = 0;
+    int count = *(int*)(g_base + 0xACC6BC);
+    u32* idx = *(u32**)(g_base + 0xACC6C0); uint8_t* tab = *(uint8_t**)(g_base + 0xACC6D0);
+    if (count > 0 && idx && tab && !IsBadReadPtr(idx, count * 4)) {
+        for (int i = 0; i < count && nl < SUB_MAXL; i++) {
+            const WCHAR* t = *(const WCHAR**)(tab + idx[i] * 20 + 8);
+            if (!t || IsBadStringPtrW(t, 512)) continue;
+            lines[nl++] = t;
+            if (lstrlenW(cur) + lstrlenW(t) + 2 < 2048) { lstrcatW(cur, t); lstrcatW(cur, L"\n"); }
+        }
+    }
+    if (!lstrcmpW(cur, last)) return;
+    lstrcpyW(last, cur);
+    SubRenderLines(lines, nl);
+}
+static void ConnectSubtitles(void* anyGraphItf)
+{
+    void* fg = NULL; void* en = NULL; void* f = NULL; ULONG got = 0;
+    if (FAILED(((QI_t)VTBL(anyGraphItf)[0])(anyGraphItf, &kIID_IFilterGraph, &fg)) || !fg) return;
+    if (SUCCEEDED(((EnumF_t)VTBL(fg)[5])(fg, &en)) && en) {
+        while (((Next_t)VTBL(en)[3])(en, 1, &f, &got) == S_OK && got) {
+            void* c = NULL;
+            if (SUCCEEDED(((QI_t)VTBL(f)[0])(f, &kIID_SubRenderConsumer, &c)) && c) {
+                g_subW = *(int*)(g_base + 0xACC698); g_subH = *(int*)(g_base + 0xACC69C);
+                g_subConsumer = c;
+                typedef HRESULT (__stdcall *Connect_t)(void*, void*);
+                HRESULT hr = ((Connect_t)VTBL(c)[20])(c, &g_subProvider);
+                logf_("movies: subtitle provider connected to the renderer (%08lX), frame %dx%d", hr, g_subW, g_subH);
+            }
+            ((Release_t)VTBL(f)[2])(f);
+        }
+        ((Release_t)VTBL(en)[2])(en);
+    }
+    ((Release_t)VTBL(fg)[2])(fg);
+}
 // The renderer's window is a child of the game window; drawn that way, the display shows stale blocks from
 // earlier frames (the renderer's own output is clean). Moving it into a separate borderless window that sits
 // above the game (owned by it, never activated) makes Windows compose it like a normal video player.
@@ -1166,6 +1479,7 @@ static HRESULT __stdcall SetWinPos_wrap(void* vw, long l, long t, long w, long h
 {
     static int logged = 0;
     if (logged++ < 2) LogGraph(vw);
+    ConnectSubtitles(vw);
     // The game sizes the video window to the picture (letterbox strips are its parent window). With
     // MovieFullWindow=1 the renderer window covers the whole movie window and draws the letterbox itself:
     // a flip-model swap chain that covers the screen is shown by Windows directly (independent flip),
@@ -1733,7 +2047,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.7.1  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.8  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
@@ -1750,9 +2064,11 @@ static void Install(void)
         return;
     }
 
-    g_uiW_d = 0.6 * aspect;
+    g_aspect = aspect;
+    g_uiW_d = g_uiH_d * aspect;
     g_uiW_f = (float)g_uiW_d;
     g_e = (float)((g_uiW_d - 0.8) * 0.5);
+    if (g_uiScale != 1.0f) logf_("UI scale %.0f%% in game: virtual screen %.4f x %.4f", g_uiScale * 100.0f, 0.6 / g_uiScale * aspect, 0.6 / g_uiScale);
     dlogf_("UI width %.4f, HUD shift %.4f", g_uiW_d, g_e);
 
     // 1) UI <-> screen conversions use our width
@@ -1768,6 +2084,16 @@ static void Install(void)
 
     for (size_t i = 0; i < sizeof kDoubleSites / sizeof kDoubleSites[0]; i++)
         WriteMem(g_base + kDoubleSites[i], &pd, 4);
+    if (g_uiScale != 1.0f) {
+        static const u32 kYSites[] = { 0x4C649A, 0x4C64C9, 0x4C64FA, 0x4C6529, 0x4C6566, 0x4C65A6 };   // double 0.6
+        int ok = *(u32*)(g_base + 0x7AE55A) == g_base + 0x93D84C;                                       // ortho top
+        for (size_t i = 0; i < sizeof kYSites / sizeof kYSites[0]; i++) ok &= *(u32*)(g_base + kYSites[i]) == g_base + 0x93C218;
+        if (ok) {
+            u32 ph = (u32)&g_uiH_d, pf = (u32)&g_uiH_f;
+            for (size_t i = 0; i < sizeof kYSites / sizeof kYSites[0]; i++) WriteMem(g_base + kYSites[i], &ph, 4);
+            WriteMem(g_base + 0x7AE55A, &pf, 4);
+        } else { logf_("UI scale: height sites not recognised, scale off"); g_uiScale = 1.0f; }
+    }
 
     // 2) UI ortho projection: right edge = our width
     u32 pf = (u32)&g_uiW_f;

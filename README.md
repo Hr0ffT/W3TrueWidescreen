@@ -10,6 +10,7 @@ W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Thr
 - **The world fills the whole screen**, including behind the console, the way patch 1.29+ does it. The see-through gaps of the console stay black, as in the original.
 - **Original field of view.** On a wide screen the engine zooms in (it derives the field of view from the screen diagonal). The mod restores the 4:3 vertical view, so the extra width just shows more.
 - **Menus.** The 3D backgrounds fill the screen at the original distance. Buttons and the decorative frames, chains and panels go to the screen edges, as they sit on a 4:3 screen. The loading and score screens stay centred.
+- **Interface size** (`UIScale`, optional). The in-game interface can be made smaller (or larger) in percent: the console, buttons, minimap, portraits and texts shrink together and the world gets more room. Clicks land where they should at any size. Handy on big screens, where the original console takes a third of the height. Menus keep their original size; the loading screen keeps its layout.
 - **Hero portraits** go to the left screen edge, and the letterbox of in-game cutscenes spans the full width (both optional).
 - **Campaign menu fade** covers the whole screen instead of only its left part.
 - **Above 64 fps.** The engine never draws more than 64 frames per second, whatever the monitor. `FpsLimit` raises that to your monitor's refresh rate (for example 144) without touching the game logic: the simulation, timers and game speed stay exactly as they were. Off by default (`FpsLimit=0`).
@@ -45,12 +46,16 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `WorldFullHeight` | 1 | World behind the console (0 = original black strips) |
 | `FovFix` | 1 | Original 4:3 vertical field of view (0 = engine default, zoomed in) |
 | `CameraZoomOut` | 1.0 | Extra zoom-out for the game camera |
+| `UIScale` | 100 | In-game interface size in percent (50..150); menus keep their size |
+| `LoadingFullScreen` | 0 | Loading screen picture over the whole screen (stretched) instead of 4:3 with black bars; the bars beside the score screen are filled |
 | `HeroBarEdge` | 1 | Hero portraits at the left screen edge |
 | `CinematicFullWidth` | 1 | Cutscene letterbox across the full width |
 | `MenuLayout` | 1 | Menu panels at the screen edges (0 = centred 4:3) |
 | `MovieNativeMode` | 1 | Movies at desktop resolution without the gamma change (0 = original 800×600) |
 | `MovieRenderer` | 1 | Use the movie renderer from the `W3TrueWidescreen` folder if it is there |
 | `MovieSuperRes` | 1 | NVIDIA RTX Video super resolution for the movies |
+| `MovieSubtitleSize` | 100 | Size of the movie subtitles with the movie renderer, in percent |
+| `MovieSubtitleBrightness` | 100 | Brightness of the movie subtitles' white, in percent (lower it if they glare with HDR) |
 | `MoviePlayer` | 0 | Play movies in an external player: 1 = MPC-HC, or the path to the player's exe |
 | `AllowPathQuery` | 1 | Let other programs read the game's exe path, so NVIDIA App keeps its per-game settings (0 = original lock) |
 | `FpsLimit` | 0 | Frame rate limit, e.g. 144 for a 144 Hz monitor (0 = the game's usual 64 fps). The game logic is not touched, see below |
@@ -72,6 +77,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 
 - Tested on 3840×2160 (16:9). Other aspects are computed the same way, but they have seen less testing.
 - In-game cutscenes (rendered by the engine) keep the engine's look; only their letterbox is widened.
+- `UIScale` is not applied on 4:3 screens. On DracoL1ch's DotA Allstars maps everything follows the scale except the text of the tooltips in the map's own settings menu, which the map draws at a fixed size.
 - The mod does not change gameplay or network data, but use it at your own discretion online.
 - **DotA Allstars by DracoL1ch (7.0x)** builds its own interface with helper DLLs and has its own `WideScreen` option (in the map's settings) for the 3D view. With `DotAOriginal=1` the mod steps aside while such a map runs (menus, other maps and movies are unaffected) and only stretches the map's loading screen picture. With `DotAOriginal=0` (default) the mod also works on these maps: their interface (top hero bar, shop, menu buttons, version label) is laid out over the wide screen, and the 3D view is the same as with the map's `WideScreen` option, but over the full screen height (the mod switches the option off while the map runs, it is not needed). Tested with `DotA_Allstars_7.07b1.w3x`; other 7.0x versions should behave the same but have not been checked. These maps also hang when the game window is resized, with or without the mod.
 
@@ -91,6 +97,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.8** — `UIScale`: size of the in-game interface in percent. `LoadingFullScreen`: loading screen picture over the whole screen. Movie subtitles (Subtitles on in the game's options) are shown with the movie renderer too, drawn by the renderer itself, so RTX HDR stays on; `MovieSubtitleSize` and `MovieSubtitleBrightness` set their size and brightness. With `LoadingFullScreen=1` the black bars beside the score screen are filled.
 - **1.7.1** — On 4:3 screens the movie options (native mode, movie renderer, external player) and `FpsLimit` now work too; before, the mod did nothing there.
 - **1.7** — DracoL1ch's DotA Allstars maps with the mod on (`DotAOriginal=0`, now the default): their interface is laid out over the wide screen, the 3D view is the one of the map's WideScreen option, over the full screen height, with a black backing under the console.
 - **1.6** — `DotAOriginal`: DracoL1ch's DotA Allstars maps run as without the mod (they bring their own interface and WideScreen option); their loading screen picture is stretched to the screen width.
