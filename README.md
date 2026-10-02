@@ -12,6 +12,8 @@ W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Thr
 - **Menus.** The 3D backgrounds fill the screen at the original distance. Buttons and the decorative frames, chains and panels go to the screen edges, as they sit on a 4:3 screen. The loading and score screens stay centred.
 - **Hero portraits** go to the left screen edge, and the letterbox of in-game cutscenes spans the full width (both optional).
 - **Campaign menu fade** covers the whole screen instead of only its left part.
+- **Above 64 fps.** The engine never draws more than 64 frames per second, whatever the monitor. `FpsLimit` raises that to your monitor's refresh rate (for example 144) without touching the game logic: the simulation, timers and game speed stay exactly as they were. Off by default (`FpsLimit=0`).
+- **DotA Allstars by DracoL1ch.** These maps bring their own interface and their own WideScreen option. The mod lays their interface out over the wide screen as well and shows the world over the full screen height. Tested with DotA Allstars 7.07b1.
 - **Movies at native resolution.** For every movie the game switches the screen to 800×600 and brightens it with a strong gamma ramp, so on a modern display the movies look blurry and washed out. The mod keeps the desktop resolution and colours.
 - **Optional movie renderer** (the `W3TrueWidescreen` folder): the movies are decoded by LAV Filters and drawn by MPC Video Renderer, full screen with clean blacks and, on NVIDIA RTX cards, RTX Video super resolution. The original Blizzard movie files play without installing codecs.
 - **NVIDIA App keeps its settings for the game.** The game locks its process against other programs (an old anti-hack measure), so NVIDIA App cannot tell which game is running and forgets RTX HDR and the game filters. The mod lets other programs read only the path to the game's exe; memory access stays locked. The mod is loaded after NVIDIA App's check at game start, so your saved values no longer reset, but the profile is not applied automatically: select it once in the overlay (Alt+F3) after starting the game. For a complete fix, there is a standalone proxy DLL, [W3_RTX_HDR_Fix](https://github.com/Hr0ffT/W3_RTX_HDR_Fix), which hands NVIDIA App the exe path at an early boot stage, so the correct profile is applied immediately on launch with nothing to click.
@@ -53,7 +55,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `AllowPathQuery` | 1 | Let other programs read the game's exe path, so NVIDIA App keeps its per-game settings (0 = original lock) |
 | `FpsLimit` | 0 | Frame rate limit, e.g. 144 for a 144 Hz monitor (0 = the game's usual 64 fps). The game logic is not touched, see below |
 | `Width` / `Height` | — | Force an aspect if the one from the video settings is wrong |
-| `DotAOriginal` | 1 | DracoL1ch's DotA Allstars maps run as without the mod (use their own WideScreen option), see below |
+| `DotAOriginal` | 0 | 1 = DracoL1ch's DotA Allstars maps run as without the mod (use their own WideScreen option), see below |
 | `Debug` | 0 | Detailed log for bug reports |
 
 ## Troubleshooting
@@ -71,7 +73,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 - Tested on 3840×2160 (16:9). Other aspects are computed the same way, but they have seen less testing.
 - In-game cutscenes (rendered by the engine) keep the engine's look; only their letterbox is widened.
 - The mod does not change gameplay or network data, but use it at your own discretion online.
-- **DotA Allstars by DracoL1ch (7.0x)** builds its own interface with helper DLLs and has its own `WideScreen` option (in the map's settings) for the 3D view. With `DotAOriginal=1` the mod steps aside while such a map runs (menus, other maps and movies are unaffected) and only stretches the map's loading screen picture. With `DotAOriginal=0` the mod also works on these maps, but their interface is not adapted yet. These maps also hang when the game window is resized, with or without the mod.
+- **DotA Allstars by DracoL1ch (7.0x)** builds its own interface with helper DLLs and has its own `WideScreen` option (in the map's settings) for the 3D view. With `DotAOriginal=1` the mod steps aside while such a map runs (menus, other maps and movies are unaffected) and only stretches the map's loading screen picture. With `DotAOriginal=0` (default) the mod also works on these maps: their interface (top hero bar, shop, menu buttons, version label) is laid out over the wide screen, and the 3D view is the same as with the map's `WideScreen` option, but over the full screen height (the mod switches the option off while the map runs, it is not needed). Tested with `DotA_Allstars_7.07b1.w3x`; other 7.0x versions should behave the same but have not been checked. These maps also hang when the game window is resized, with or without the mod.
 
 ## Building from source
 
@@ -89,6 +91,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.7** — DracoL1ch's DotA Allstars maps with the mod on (`DotAOriginal=0`, now the default): their interface is laid out over the wide screen, the 3D view is the one of the map's WideScreen option, over the full screen height, with a black backing under the console.
 - **1.6** — `DotAOriginal`: DracoL1ch's DotA Allstars maps run as without the mod (they bring their own interface and WideScreen option); their loading screen picture is stretched to the screen width.
 - **1.5.1** — The movie renderer (MPC Video Renderer, LAV Filters) is loaded at the first movie instead of at startup. Loaded at startup, it made DracoL1ch's DotA Allstars 7.0x maps crash at hero selection (heap corruption).
 - **1.5** — `FpsLimit`: a frame rate limit above the engine's 64 fps, e.g. 144 for a 144 Hz monitor (0 = unchanged). Game logic, timers and animations stepped per tick are untouched; see "How it works".
