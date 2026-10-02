@@ -87,6 +87,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.5.1** — The movie renderer (MPC Video Renderer, LAV Filters) is loaded at the first movie instead of at startup. Loaded at startup, it made DracoL1ch's DotA Allstars 7.0x maps crash at hero selection (heap corruption).
 - **1.5** — `FpsLimit`: a frame rate limit above the engine's 64 fps, e.g. 144 for a 144 Hz monitor (0 = unchanged). Game logic, timers and animations stepped per tick are untouched; see "How it works".
 - **1.4.1** — Map clicks now work in the strip beside the top bar. With `WorldFullHeight=1` the world was drawn up to the top edge, but the game still rejected clicks above the original top of the world view (an upper limit on the cursor's y before picking the terrain); that limit is now lifted when the world is drawn full height.
 - **1.4** — First public release.

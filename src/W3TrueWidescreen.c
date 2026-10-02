@@ -630,6 +630,8 @@ typedef HRESULT (WINAPI *CoCreate_t)(REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID*
 typedef HRESULT (WINAPI *DllGetClassObject_t)(REFCLSID, REFIID, LPVOID*);
 static CoCreate_t orig_CoCreate;
 static DllGetClassObject_t g_mpcvrGetClass;
+static char g_mpcvrPath[MAX_PATH];
+static int LoadMovieComponents(void);
 static DllGetClassObject_t g_lavGetClass;
 static DllGetClassObject_t g_lavSplitGetClass;     // optional: W3TrueWidescreen\\LAV\\LAVSplitter.ax (unpacks DivX packed B-frames)
 static const GUID kCLSID_FilterGraph = {0xe436ebb3,0x524f,0x11ce,{0x9f,0x53,0x00,0x20,0xaf,0x0b,0xa7,0x70}};
@@ -768,6 +770,7 @@ static HRESULT WINAPI CoCreate_hook(REFCLSID clsid, LPUNKNOWN outer, DWORD ctx, 
 {
     static int extLog;
     if (g_debug && !extLog && IsEqualGUID(clsid, &kCLSID_FilterGraph)) { extLog = 1; HookVideoExtensions(); }   // not from DllMain (loader lock)
+    if (g_mpcvrPath[0] && IsEqualGUID(clsid, &kCLSID_FilterGraph)) LoadMovieComponents();
     HRESULT hr = orig_CoCreate(clsid, outer, ctx, iid, out);
     if (SUCCEEDED(hr) && out && *out && g_mpcvrGetClass && IsEqualGUID(clsid, &kCLSID_FilterGraph))
         AddMpcvrToGraph(*out);
@@ -991,18 +994,12 @@ static void HookVideoExtensions(void)
     ID3D11DeviceContext_Release(ctx); ID3D11Device_Release(dev);
 }
 
-static void InstallMovieRenderer(void)
+// MPC Video Renderer (and LAV) are loaded at the first movie, not at startup: initialising the renderer
+// changes the process enough to expose memory bugs in some maps (DracoL1ch DotA: heap corruption at hero pick)
+static int LoadMovieComponents(void)
 {
-    if (!g_movieRenderer) return;
-    char p[MAX_PATH]; GetModuleFileNameA(NULL, p, MAX_PATH);
-    char* sl = strrchr(p, '\\'); if (sl) *(sl + 1) = 0;
-    strcat(p, "W3TrueWidescreen\\MpcVideoRenderer.ax");
-    if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) return;       // optional component not installed
-    if (g_movieVrDebug) {
-        char dp[MAX_PATH]; strcpy(dp, p);
-        char* e = strrchr(dp, '.'); if (e) strcpy(e, "_dbg.ax");
-        if (GetFileAttributesA(dp) != INVALID_FILE_ATTRIBUTES) strcpy(p, dp);
-    }
+    static int tried; if (tried) return g_mpcvrGetClass != NULL; tried = 1;
+    char p[MAX_PATH]; strcpy(p, g_mpcvrPath);
     HMODULE m = LoadLibraryA(p);
     g_mpcvrGetClass = m ? (DllGetClassObject_t)GetProcAddress(m, "DllGetClassObject") : NULL;
     if (m && g_movieVrDebug) {
@@ -1013,7 +1010,7 @@ static void InstallMovieRenderer(void)
         HookModuleImport(m, "KERNEL32.dll", "OutputDebugStringW", (void*)ODS_hook);
         logf_("movies: renderer debug trace -> %s (%s)", lp, p);
     }
-    if (!g_mpcvrGetClass) { logf_("movies: could not load %s", p); return; }
+    if (!g_mpcvrGetClass) { logf_("movies: could not load %s", p); return 0; }
     orig_VerifyVersion = (VerifyVersion_t)GetProcAddress(GetModuleHandleA("kernel32.dll"), "VerifyVersionInfoW");
     if (orig_VerifyVersion) HookModuleImport(m, "KERNEL32.dll", "VerifyVersionInfoW", (void*)VerifyVersion_real);
     char* w = strrchr(p, '\\'); if (w) *(w + 1) = 0;
@@ -1030,6 +1027,23 @@ static void InstallMovieRenderer(void)
             if (!g_lavSplitGetClass) logf_("movies: could not load %s (error %lu)", p, GetLastError());
         }
     }
+    logf_("movies: MPC Video Renderer loaded%s%s", g_lavGetClass ? ", LAV Video decoder" : "", g_lavSplitGetClass ? ", LAV Splitter" : "");
+    return 1;
+}
+
+static void InstallMovieRenderer(void)
+{
+    if (!g_movieRenderer) return;
+    char p[MAX_PATH]; GetModuleFileNameA(NULL, p, MAX_PATH);
+    char* sl = strrchr(p, '\\'); if (sl) *(sl + 1) = 0;
+    strcat(p, "W3TrueWidescreen\\MpcVideoRenderer.ax");
+    if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) return;       // optional component not installed
+    if (g_movieVrDebug) {
+        char dp[MAX_PATH]; strcpy(dp, p);
+        char* e = strrchr(dp, '.'); if (e) strcpy(e, "_dbg.ax");
+        if (GetFileAttributesA(dp) != INVALID_FILE_ATTRIBUTES) strcpy(p, dp);
+    }
+    strcpy(g_mpcvrPath, p);
     // The game sizes the movie window from IBasicVideo::get_VideoWidth/Height, which MPC Video Renderer does not
     // implement (the values stay uninitialised, the window lands off screen). Ask GetVideoSize instead.
     static const uint8_t kOrigSize[] = { 0x8b,0x08,0x8d,0x54,0x24,0x0c,0x52,0x50,0x8b,0x41,0x28,0xff,0xd0,0x8b,0x04,0x24,
@@ -1045,7 +1059,7 @@ static void InstallMovieRenderer(void)
         0xeb,0x10 };                       // jmp to the window placement code (unchanged)
     if (sizeof kNewSize == sizeof kOrigSize && memcmp((void*)(g_base + 0x52B55E), kOrigSize, sizeof kOrigSize) == 0)
         WriteMem(g_base + 0x52B55E, kNewSize, sizeof kNewSize);
-    else { logf_("movies: movie window code not recognised, MPC Video Renderer off"); g_mpcvrGetClass = NULL; return; }
+    else { logf_("movies: movie window code not recognised, MPC Video Renderer off"); g_mpcvrGetClass = NULL; g_mpcvrPath[0] = 0; return; }
     // MPC Video Renderer draws into the rectangle given by IBasicVideo::SetDestinationPosition, which the game
     // never calls (the system renderer defaults to the whole window). Route the game's SetWindowPosition call
     // through a wrapper that also sets the destination to the whole window.
@@ -1054,7 +1068,7 @@ static void InstallMovieRenderer(void)
         uint8_t p[6] = { 0xb8, 0, 0, 0, 0, 0x90 };               // mov eax, SetWinPos_wrap ; nop
         u32 f = (u32)SetWinPos_wrap; memcpy(p + 1, &f, 4);
         WriteMem(g_base + 0x52B5D3, p, 6);
-    } else { logf_("movies: movie window code not recognised, MPC Video Renderer off"); g_mpcvrGetClass = NULL; return; }
+    } else { logf_("movies: movie window code not recognised, MPC Video Renderer off"); g_mpcvrGetClass = NULL; g_mpcvrPath[0] = 0; return; }
     u32 iat = g_base + RVA_IAT_CoCreateInstance;
     if (*(u32*)iat != (u32)GetProcAddress(GetModuleHandleA("ole32.dll"), "CoCreateInstance") &&
         *(u32*)iat != (u32)GetProcAddress(GetModuleHandleA("combase.dll"), "CoCreateInstance"))
@@ -1062,7 +1076,7 @@ static void InstallMovieRenderer(void)
     orig_CoCreate = (CoCreate_t)*(u32*)iat;
     u32 hook = (u32)CoCreate_hook;
     WriteMem(iat, &hook, 4);
-    logf_("movies: MPC Video Renderer in use%s%s", g_lavGetClass ? ", LAV Video decoder" : "", g_lavSplitGetClass ? ", LAV Splitter" : "");
+    logf_("movies: MPC Video Renderer on (loaded at the first movie)");
 }
 
 // ---- cinematics. For every movie the game switches the display to 800x600 (ChangeDisplaySettings) and
@@ -1412,7 +1426,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.5  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.5.1  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
