@@ -1733,14 +1733,22 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.7  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.7.1  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
     double aspect = ReadAspect(src, sizeof src);
     logf_("aspect %.4f (%s)", aspect, src);
     InstallPathQuery();
-    if (aspect < 1.34) { logf_("aspect is 4:3 or narrower, nothing to do"); return; }
+    if (aspect < 1.34) {
+        // nothing to widen, but the movie and frame rate options do not depend on the aspect
+        logf_("aspect is 4:3 or narrower: interface and view left as they are");
+        InstallMovieNative();
+        InstallMovieRenderer();
+        InstallExternalPlayer(g_moviePlayerOpt);
+        InstallFpsLimit();
+        return;
+    }
 
     g_uiW_d = 0.6 * aspect;
     g_uiW_f = (float)g_uiW_d;

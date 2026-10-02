@@ -64,7 +64,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 
 - `unsupported game version`: this is not 1.26a.
 - `WARNING: window is ...`: the window size does not match the resolution in the settings. Set `Width`/`Height` in the ini.
-- `aspect is 4:3 or narrower`: nothing to do on a 4:3 screen.
+- `aspect is 4:3 or narrower`: on a 4:3 screen the interface and view stay as they are; the movie options and `FpsLimit` still work.
 - `movies: ...`: what the movie renderer did. If the movies misbehave, set `MovieRenderer=0` to fall back to the Windows renderer.
 - `/fps` in the game chat shows less than `FpsLimit`: the game is hitting the monitor's refresh rate (vsync) or the GPU, not the limit. Set `FpsLimit` to the monitor's refresh rate.
 
@@ -91,6 +91,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.7.1** — On 4:3 screens the movie options (native mode, movie renderer, external player) and `FpsLimit` now work too; before, the mod did nothing there.
 - **1.7** — DracoL1ch's DotA Allstars maps with the mod on (`DotAOriginal=0`, now the default): their interface is laid out over the wide screen, the 3D view is the one of the map's WideScreen option, over the full screen height, with a black backing under the console.
 - **1.6** — `DotAOriginal`: DracoL1ch's DotA Allstars maps run as without the mod (they bring their own interface and WideScreen option); their loading screen picture is stretched to the screen width.
 - **1.5.1** — The movie renderer (MPC Video Renderer, LAV Filters) is loaded at the first movie instead of at startup. Loaded at startup, it made DracoL1ch's DotA Allstars 7.0x maps crash at hero selection (heap corruption).
