@@ -1635,8 +1635,8 @@ static uint8_t* SsBuildModelQ(const uint8_t* d, DWORD n, const SsQuad* q, int nq
 // right screen edge. The top (wood bar, tabs, header cells) is the extended layout of variant 1 without the mirrored
 // left group, so tabs and cells stay where the score screen's texts are; it is toned to the stretched sheet below it
 // and crossfades into it over a few rows of plain parchment.
-#define SS_V2B0 146
-#define SS_V2B1 182
+#define SS_V2B0 160
+#define SS_V2B1 196
 #define SS_V2W(wt) (1024 + 2 * (wt))
 #define SS_V2RK 192
 // lf: SsBuild's left filler made with wl = wt + 2 and no left group; returns SS_ROWS x SS_V2W(wt) RGB
@@ -1687,8 +1687,10 @@ static float* SsCompose2(const SsGen* G, int wt, const float* rf, const float* l
             gg[X * 3 + c] = g < 0.7f ? 0.7f : g > 1.4f ? 1.4f : g;
         }
     for (int c = 0; c < 3; c++) SsBlurLine(gg + c, W, 3, 16, tmp);
-    for (int r = 66; r < SS_V2B1; r++) {
-        float k = r < 140 ? (r - 66) / 74.0f : 1.0f;
+    // (only below the header row: above it the selected tab's highlight, a piece of the original picture, lies over
+    // the band, so the band keeps the original's tone there)
+    for (int r = 136; r < SS_V2B1; r++) {
+        float k = r < SS_V2B0 ? (float)(r - 136) / (SS_V2B0 - 136) : 1.0f;
         for (int X = 0; X < W; X++) for (int c = 0; c < 3; c++) {
             float* p = P(B, W, r, X); float v = p[c] * (1 + (gg[X * 3 + c] - 1) * k); p[c] = v > 255 ? 255 : v;
         }
@@ -2886,7 +2888,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.8.1  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.9  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
