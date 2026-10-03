@@ -1006,6 +1006,11 @@ static uint8_t* AddSideGeosets(const uint8_t* d, DWORD n, float e, float strip, 
 #define SS_X0 136                   // crossfade from the narrow source to the wide one
 #define SS_X1 146
 #define SS_NW ((SS_S1 - SS_S0) * 2)
+#define SS_RB0 392                  // right filler, top rows: R columns of the metal bracket bar (no hanging bits)
+#define SS_RB1 452
+#define SS_RBN ((SS_RB1 - SS_RB0) * 2)
+#define SS_RBH 96                   // ... used above this row, faded out from SS_RBF
+#define SS_RBF 82
 #define SS_WW ((512 - SS_S0 + 420) * 2)
 
 typedef struct { float* L; float* R; uint8_t pal[2][1024]; uint8_t hdr[2][28]; } SsSrc;
@@ -1086,7 +1091,8 @@ typedef struct {
     float* tileW;                   // SS_ROWS x SS_WW
     float patch[SS_ROWS][SS_LPW - 2][3];  // L columns 2..LPW-1, brightened
     float rpatch[SS_ROWS][SS_PW][3];      // R columns CR-PW..CR-1, brightened
-    float gN[SS_ROWS][3], gP[SS_ROWS][3], gR[SS_ROWS][3], mix[SS_ROWS];
+    float gN[SS_ROWS][3], gP[SS_ROWS][3], gR[SS_ROWS][3], gNR[SS_ROWS][3], mix[SS_ROWS];
+    float tileB[SS_RBH][SS_RBN][3];       // the right filler's top rows: the bracket bar continued to the border
     const float* R;                       // the source tiles (for the seams and variant 2)
     const float* L;
 } SsGen;
@@ -1097,6 +1103,15 @@ static void SsTileAt(const SsGen* G, int r, int col, float* o)
     const float* b = G->tileW + ((size_t)r * SS_WW + col % SS_WW) * 3;
     float m = G->mix[r];
     for (int c = 0; c < 3; c++) o[c] = a[c] * (1 - m) + b[c] * m;
+}
+
+// the right filler: like SsTileAt, with the bracket bar of the R tile in the top rows
+static float SsMixB(int r) { return r < SS_RBF ? 1.0f : r >= SS_RBH ? 0.0f : 1.0f - (float)(r - SS_RBF) / (SS_RBH - SS_RBF); }
+static void SsTileAtR(const SsGen* G, int r, int col, float* o)
+{
+    SsTileAt(G, r, col, o);
+    float m = SsMixB(r);
+    if (m > 0) for (int c = 0; c < 3; c++) o[c] = o[c] * (1 - m) + G->tileB[r][col % SS_RBN][c] * m;
 }
 
 static int SsPrepare(SsGen* G, const SsSrc* S)
@@ -1146,7 +1161,12 @@ static int SsPrepare(SsGen* G, const SsSrc* S)
     #undef SSW
     free(low); free(tmp);
     // tone of the filler per row
-    static float own[SS_ROWS][3], nearT[SS_ROWS][3], pref[SS_ROWS][3], rref[SS_ROWS][3];
+    static float own[SS_ROWS][3], ownR[SS_ROWS][3], nearT[SS_ROWS][3], nearR[SS_ROWS][3], pref[SS_ROWS][3], rref[SS_ROWS][3];
+    for (int r = 0; r < SS_RBH; r++)
+        for (int x = 0; x < SS_RB1 - SS_RB0; x++) {
+            memcpy(G->tileB[r][x], &R[(r * 512 + SS_RB0 + x) * 3], 12);
+            memcpy(G->tileB[r][SS_RBN - 1 - x], &R[(r * 512 + SS_RB0 + x) * 3], 12);
+        }
     for (int r = 0; r < SS_ROWS; r++) {
         float m = (float)(r - SS_X0) / (SS_X1 - SS_X0);
         G->mix[r] = m < 0 ? 0 : m > 1 ? 1 : m;
@@ -1155,6 +1175,9 @@ static int SsPrepare(SsGen* G, const SsSrc* S)
             for (int x = 0; x < SS_NW; x++) a += G->tileN[((size_t)r * SS_NW + x) * 3 + c];
             for (int x = 0; x < SS_WW; x++) b += G->tileW[((size_t)r * SS_WW + x) * 3 + c];
             own[r][c] = (float)(a / SS_NW * (1 - G->mix[r]) + b / SS_WW * G->mix[r]);
+            double bb = 0; float mb = SsMixB(r);
+            if (mb > 0) for (int x = 0; x < SS_RBN; x++) bb += G->tileB[r][x][c];
+            ownR[r][c] = own[r][c] * (1 - mb) + (float)(bb / SS_RBN) * mb;
         }
     }
     // brightened copies of the sheet's left edge and of the right edge of the part that stays
@@ -1191,13 +1214,14 @@ static int SsPrepare(SsGen* G, const SsSrc* S)
         for (int c = 0; c < 3; c++) {
             nearT[r][c] = (R[(r * 512 + cc - 4) * 3 + c] + R[(r * 512 + cc - 3) * 3 + c] + R[(r * 512 + cc - 2) * 3 + c] + R[(r * 512 + cc - 1) * 3 + c]) / 4;
             pref[r][c] = (G->patch[r][0][c] + G->patch[r][1][c] + G->patch[r][2][c] + G->patch[r][3][c]) / 4;
-            rref[r][c] = r < SS_SPLIT ? nearT[r][c] :
-                         (G->rpatch[r][SS_PW - 4][c] + G->rpatch[r][SS_PW - 3][c] + G->rpatch[r][SS_PW - 2][c] + G->rpatch[r][SS_PW - 1][c]) / 4;
+            nearR[r][c] = (R[(r * 512 + SS_CR - 4) * 3 + c] + R[(r * 512 + SS_CR - 3) * 3 + c] + R[(r * 512 + SS_CR - 2) * 3 + c] + R[(r * 512 + SS_CR - 1) * 3 + c]) / 4;
+            rref[r][c] = (G->rpatch[r][SS_PW - 4][c] + G->rpatch[r][SS_PW - 3][c] + G->rpatch[r][SS_PW - 2][c] + G->rpatch[r][SS_PW - 1][c]) / 4;
         }
     }
     SsGains(&nearT[0][0], &own[0][0], &G->gN[0][0]);
     SsGains(&pref[0][0], &own[0][0], &G->gP[0][0]);
-    SsGains(&rref[0][0], &own[0][0], &G->gR[0][0]);
+    SsGains(&rref[0][0], &ownR[0][0], &G->gR[0][0]);
+    SsGains(&nearR[0][0], &ownR[0][0], &G->gNR[0][0]);
     return 1;
 }
 
@@ -1235,7 +1259,7 @@ static void SsSeam(float* img, int w, int x0, int dir, int n, const float (*ref)
     }
 }
 #define SS_BW (SS_CR - SS_BR)        // the top rows of R columns BR..CR-1 (bracket end, torn edge) go into the fillers
-#define SS_RFW(wt) (SS_PW + (wt) + SS_BW)
+#define SS_RFW(wt) (SS_PW + (wt))
 #define SS_LFW(wl) ((wl) + SS_LPW - 2)
 // right filler: [R edge copy (PW) | filler (wt) | top rows: R columns BR..CR-1 (BW)]
 // left filler:  [top rows: R columns CR-1..BR mirrored (up to BW), then filler (wl in all) | L edge copy (PW-2)]
@@ -1251,14 +1275,12 @@ static void SsBuild(const SsGen* G, int wt, int wl, int leftGroup, float* rf, fl
         for (int x = 0; x < SS_PW; x++) memcpy(PX(rf, rw, r, x), G->rpatch[r][x], 12);
         for (int x = 0; x < wt; x++) {
             float t = (x + 0.5f) / wt;
-            SsTileAt(G, r, x, t3);
+            SsTileAtR(G, r, x, t3);
             for (int c = 0; c < 3; c++) {
-                float v = t3[c] * (G->gR[r][c] * (1 - t) + G->gN[r][c] * t);
+                float v = t3[c] * (G->gR[r][c] * (1 - t) + G->gNR[r][c] * t);
                 PX(rf, rw, r, SS_PW + x)[c] = v < 0 ? 0 : v > 255 ? 255 : v;
             }
         }
-        for (int x = 0; x < SS_BW; x++)
-            memcpy(PX(rf, rw, r, SS_PW + wt + x), r < SS_SPLIT ? &R[(r * 512 + SS_BR + x) * 3] : PX(rf, rw, r, SS_PW + wt - 1), 12);
         for (int x = 0; x < wl; x++) {
             float t = (x + 0.5f) / wl;
             SsTileAt(G, r, x + SS_WW / 2, t3);
@@ -1273,7 +1295,7 @@ static void SsBuild(const SsGen* G, int wt, int wl, int leftGroup, float* rf, fl
     // the top rows (above SS_SPLIT) sit over different columns than the rows below them (the R block, and on the
     // right the filler starts at BR on top but at CR-PW below): tone the sheet rows above the split to what lies
     // right below, per column (smoothed), fading in from the torn edge
-    for (int side = 0; side < 2; side++) {
+    for (int side = 1; side < 2; side++) {                  // (left only: on the right the columns no longer shift)
         float* img = side ? lf : rf; int w = side ? lw : rw, xa = side ? 0 : SS_PW, xb = side ? wl : rw;
         int n = xb - xa;
         if (n <= 0) continue;
@@ -1316,10 +1338,10 @@ static void SsBuild(const SsGen* G, int wt, int wl, int leftGroup, float* rf, fl
     int nr = wt / 3 < 24 ? wt / 3 : 24, nl = (wl - bw) / 3 < 24 ? (wl - bw) / 3 : 24, nl2 = wl / 3 < 24 ? wl / 3 : 24;
     #define RAVG(r, c0, ch) ((R[((r) * 512 + (c0)) * 3 + (ch)] + R[((r) * 512 + (c0) + 1) * 3 + (ch)]) / 2)
     for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++)       // right filler, left end: the R main / its edge copy
-        ref[r][c] = r < SS_SPLIT ? RAVG(r, SS_BR - 2, c) : (G->rpatch[r][SS_PW - 1][c] + G->rpatch[r][SS_PW - 2][c]) / 2;
+        ref[r][c] = (G->rpatch[r][SS_PW - 1][c] + G->rpatch[r][SS_PW - 2][c]) / 2;
     SsSeam(rf, rw, SS_PW, +1, nr, ref, NULL);
     for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++)       // right filler, right end: the block / the group
-        ref[r][c] = r < SS_SPLIT ? (PX(rf, rw, r, SS_PW + wt)[c] + PX(rf, rw, r, SS_PW + wt + 1)[c]) / 2 : RAVG(r, SS_CR, c);
+        ref[r][c] = RAVG(r, SS_CR, c);
     SsSeam(rf, rw, SS_PW + wt - 1, -1, nr, ref, NULL);
     for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++)       // left filler, right end: the left edge copy
         ref[r][c] = (G->patch[r][0][c] + G->patch[r][1][c]) / 2;
@@ -1335,12 +1357,64 @@ static void SsBuild(const SsGen* G, int wt, int wl, int leftGroup, float* rf, fl
     #undef PX
 }
 
-// RGB rows [row0, row0 + h), columns [x0, x0 + cw) of a stride-wide image -> paletted BLP1 with mipmaps, width rounded up to a power of two
+
+// a 256-colour palette for an image (median cut over a 5-bit histogram, colours averaged at full precision), BGRA
+static void SsMedianCut(const float* rgb, size_t npx, uint8_t* pal)
+{
+    static unsigned cnt[32768]; static double sum[32768][3];
+    memset(cnt, 0, sizeof cnt); memset(sum, 0, sizeof sum);
+    for (size_t i = 0; i < npx; i++) {
+        int r = (int)rgb[i * 3], g = (int)rgb[i * 3 + 1], b = (int)rgb[i * 3 + 2];
+        r = r < 0 ? 0 : r > 255 ? 255 : r; g = g < 0 ? 0 : g > 255 ? 255 : g; b = b < 0 ? 0 : b > 255 ? 255 : b;
+        int k = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+        cnt[k]++; sum[k][0] += rgb[i * 3]; sum[k][1] += rgb[i * 3 + 1]; sum[k][2] += rgb[i * 3 + 2];
+    }
+    typedef struct { int lo[3], hi[3]; unsigned n; } Box;
+    static Box box[256]; int nb = 1;
+    box[0] = (Box){ {0, 0, 0}, {31, 31, 31}, (unsigned)npx };
+    #define FOR_BOX(B) for (int a0 = (B).lo[0]; a0 <= (B).hi[0]; a0++) for (int a1 = (B).lo[1]; a1 <= (B).hi[1]; a1++) for (int a2 = (B).lo[2]; a2 <= (B).hi[2]; a2++)
+    // shrink every box to its occupied range, then split the most populated splittable box at the median
+    for (;;) {
+        for (int i = 0; i < nb; i++) {
+            Box* B = &box[i]; int lo[3] = {31, 31, 31}, hi[3] = {0, 0, 0}; unsigned n = 0;
+            FOR_BOX(*B) { unsigned c = cnt[(a0 << 10) | (a1 << 5) | a2]; if (!c) continue; n += c;
+                int v[3] = {a0, a1, a2}; for (int d = 0; d < 3; d++) { if (v[d] < lo[d]) lo[d] = v[d]; if (v[d] > hi[d]) hi[d] = v[d]; } }
+            if (n) { memcpy(B->lo, lo, sizeof lo); memcpy(B->hi, hi, sizeof hi); }
+            B->n = n;
+        }
+        if (nb >= 256) break;
+        int best = -1; double bs = 0;
+        for (int i = 0; i < nb; i++) {
+            int span = 0; for (int d = 0; d < 3; d++) if (box[i].hi[d] - box[i].lo[d] > span) span = box[i].hi[d] - box[i].lo[d];
+            double sc = (double)box[i].n * span;
+            if (span > 0 && sc > bs) { bs = sc; best = i; }
+        }
+        if (best < 0) break;
+        Box* B = &box[best]; int d = 0;
+        for (int k = 1; k < 3; k++) if (B->hi[k] - B->lo[k] > B->hi[d] - B->lo[d]) d = k;
+        unsigned hist[32] = {0};
+        FOR_BOX(*B) { int v[3] = {a0, a1, a2}; hist[v[d]] += cnt[(a0 << 10) | (a1 << 5) | a2]; }
+        unsigned acc = 0; int cut = B->lo[d];
+        for (int v = B->lo[d]; v < B->hi[d]; v++) { acc += hist[v]; cut = v; if (acc * 2 >= B->n) break; }
+        Box nbx = *B; B->hi[d] = cut; nbx.lo[d] = cut + 1;
+        box[nb++] = nbx;
+    }
+    memset(pal, 0, 1024);
+    for (int i = 0; i < nb; i++) {
+        double s3[3] = {0, 0, 0}; double n = 0;
+        FOR_BOX(box[i]) { int k = (a0 << 10) | (a1 << 5) | a2; n += cnt[k]; for (int c = 0; c < 3; c++) s3[c] += sum[k][c]; }
+        if (n < 1) continue;
+        for (int c = 0; c < 3; c++) { int v = (int)(s3[c] / n + 0.5); pal[i * 4 + 2 - c] = (uint8_t)(v > 255 ? 255 : v < 0 ? 0 : v); }
+    }
+    #undef FOR_BOX
+}
+// RGB rows [row0, row0 + h), columns [x0, x0 + cw) of a stride-wide image; its own palette is made for it (`pal`
+// only gives the alpha bytes) -> paletted BLP1 with mipmaps, width rounded up to a power of two
 static uint8_t* SsMakeBlp(const float* rgb, int stride, int x0, int cw, int row0, int h, const uint8_t* pal, const uint8_t* hdr, DWORD* outN, int* outW)
 {
     int W = 1; while (W < cw) W <<= 1;
-    static uint8_t lut[1 << 18]; static uint8_t have[1 << 18]; static const uint8_t* lutPal;
-    if (lutPal != pal) { memset(have, 0, sizeof have); lutPal = pal; }
+    static uint8_t lut[1 << 18]; static uint8_t have[1 << 18];
+    uint8_t mypal[1024];
     int levels = 0; DWORD total = 156 + 1024;
     for (int w = W, hh = h; ; w = w > 1 ? w / 2 : 1, hh = hh > 1 ? hh / 2 : 1) { total += (DWORD)w * hh; levels++; if ((w == 1 && hh == 1) || levels == 16) break; }
     uint8_t* o = (uint8_t*)calloc(1, total);
@@ -1349,6 +1423,10 @@ static uint8_t* SsMakeBlp(const float* rgb, int stride, int x0, int cw, int row0
     for (int y = 0; y < h; y++)
         for (int x = 0; x < W; x++)
             memcpy(cur + ((size_t)y * W + x) * 3, rgb + ((size_t)(row0 + y) * stride + x0 + (x < cw ? x : cw - 1)) * 3, 12);
+    SsMedianCut(cur, (size_t)W * h, mypal);
+    for (int k = 0; k < 256; k++) mypal[k * 4 + 3] = pal[3];
+    pal = mypal;
+    memset(have, 0, sizeof have);
     memcpy(o, hdr, 28);
     *(DWORD*)(o + 12) = W; *(DWORD*)(o + 16) = h;
     memcpy(o + 156, pal, 1024);
@@ -1439,16 +1517,14 @@ static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl,
     float lu1 = (float)SS_LFW(wl);
     // originals (geosets 0..3, in place)
     SQ(0, SS_LPW * K, 0.4f, 1, SS_LPW, 512, 0, 512, 512);
-    SQ(1, 0.4f, 0.4f + (SS_CR - SS_PW) * K, 1, 0, SS_CR - SS_PW, SS_SPLIT, 512, 512);
+    SQ(1, 0.4f, 0.4f + (SS_CR - SS_PW) * K, 1, 0, SS_CR - SS_PW, 0, 512, 512);
     SQ(2, SS_LPW * K, 0.4f, 0, SS_LPW, 512, 0, 256, 512);
     SQ(3, 0.4f, 0.4f + (SS_CR - SS_PW) * K, 0, 0, SS_CR - SS_PW, 0, 256, 512);
     // added
     const float gw = (512 - SS_CR) * K;
-    SQ(1, 0.4f, 0.4f + SS_BR * K, 1, 0, SS_BR, 0, SS_SPLIT, 512);
     SQ(1, 0.8f + e - gw, 0.8f + e, 1, SS_CR, 512, 0, 512, 512);
     SQ(1, -e, -e + gw, 1, 512, SS_CR, 0, 512, 512);
-    SQ(5, 0.4f + (SS_CR - SS_PW) * K, 0.8f + e - gw, 1, 0, SS_PW + wt, SS_SPLIT, 512, rfW);
-    SQ(5, 0.4f + SS_BR * K, 0.8f + e - gw, 1, SS_PW, SS_RFW(wt), 0, SS_SPLIT, rfW);
+    SQ(5, 0.4f + (SS_CR - SS_PW) * K, 0.8f + e - gw, 1, 0, SS_RFW(wt), 0, 512, rfW);
     SQ(7, -e + gw, SS_LPW * K, 1, 0, lu1, 0, 512, lfW);
     SQ(3, 0.8f + e - gw, 0.8f + e, 0, SS_CR, 512, 0, 256, 512);
     SQ(3, -e, -e + gw, 0, 512, SS_CR, 0, 256, 512);
@@ -1562,6 +1638,7 @@ static uint8_t* SsBuildModelQ(const uint8_t* d, DWORD n, const SsQuad* q, int nq
 #define SS_V2B0 146
 #define SS_V2B1 182
 #define SS_V2W(wt) (1024 + 2 * (wt))
+#define SS_V2RK 192
 // lf: SsBuild's left filler made with wl = wt + 2 and no left group; returns SS_ROWS x SS_V2W(wt) RGB
 static float* SsCompose2(const SsGen* G, int wt, const float* rf, const float* lf)
 {
@@ -1576,7 +1653,8 @@ static float* SsCompose2(const SsGen* G, int wt, const float* rf, const float* l
         for (int X = 0; X < W; X++) {
             float* o = P(E, W, r, X);
             if (X >= gx) { memcpy(o, P(R, 512, r, X - gx + SS_CR), 12); continue; }
-            float cs = 2 + (X + 0.5f) * sw / gx - 0.5f;
+            // the last SS_V2RK columns before the right border keep their width (the darkened corner stays as it is)
+            float cs = X >= gx - SS_V2RK ? (float)(512 + SS_CR - (gx - X)) : 2 + (X + 0.5f) * (sw - SS_V2RK) / (gx - SS_V2RK) - 0.5f;
             int c0 = (int)floorf(cs); float f = cs - c0;
             int c1 = c0 + 1 < 512 + SS_CR ? c0 + 1 : c0;
             const float* a = c0 < 512 ? P(L, 512, r, c0) : P(R, 512, r, c0 - 512);
@@ -1594,8 +1672,7 @@ static float* SsCompose2(const SsGen* G, int wt, const float* rf, const float* l
             else {
                 int xr = X - wt - 512;
                 if (xr >= SS_CR + wt) s = P(R, 512, r, xr - wt);
-                else if (r >= SS_SPLIT) s = xr < SS_CR - SS_PW ? P(R, 512, r, xr) : P(rf, rw, r, xr - (SS_CR - SS_PW));
-                else s = xr < SS_BR ? P(R, 512, r, xr) : P(rf, rw, r, SS_PW + xr - SS_BR);
+                else s = xr < SS_CR - SS_PW ? P(R, 512, r, xr) : P(rf, rw, r, xr - (SS_CR - SS_PW));
             }
             memcpy(P(B, W, r, X), s, 12);
         }
