@@ -9,7 +9,8 @@ W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Thr
 - **Unstretched interface.** The in-game console keeps its original proportions and sits in the centre of the screen. The game world fills the full width.
 - **The world fills the whole screen**, including behind the console, the way patch 1.29+ does it. The see-through gaps of the console stay black, as in the original.
 - **Original field of view.** On a wide screen the engine zooms in (it derives the field of view from the screen diagonal). The mod restores the 4:3 vertical view, so the extra width just shows more.
-- **Menus.** The 3D backgrounds fill the screen at the original distance. Buttons and the decorative frames, chains and panels go to the screen edges, as they sit on a 4:3 screen. The loading and score screens stay centred.
+- **Menus.** The 3D backgrounds fill the screen at the original distance. Buttons and the decorative frames, chains and panels go to the screen edges, as they sit on a 4:3 screen. The loading screen stays centred (or fills the screen with `LoadingFullScreen`).
+- **Score screen** (`ScoreScreen`). Its parchment sheet reaches the screen edges instead of sitting between black bars: by default the sheet is stretched to the width below its header, with the header cells and tabs left where the texts are; it can also be extended to both edges with its border on both sides, or kept at 4:3. The extra sheet is built from the game's own textures.
 - **Interface size** (`UIScale`, optional). The in-game interface can be made smaller (or larger) in percent: the console, buttons, minimap, portraits and texts shrink together and the world gets more room. Clicks land where they should at any size. Handy on big screens, where the original console takes a third of the height. Menus keep their original size; the loading screen keeps its layout.
 - **Hero portraits** go to the left screen edge, and the letterbox of in-game cutscenes spans the full width (both optional).
 - **Campaign menu fade** covers the whole screen instead of only its left part.
@@ -47,7 +48,8 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `FovFix` | 1 | Original 4:3 vertical field of view (0 = engine default, zoomed in) |
 | `CameraZoomOut` | 1.0 | Extra zoom-out for the game camera |
 | `UIScale` | 100 | In-game interface size in percent (50..150); menus keep their size |
-| `LoadingFullScreen` | 0 | Loading screen picture over the whole screen (stretched) instead of 4:3 with black bars; the score screen's sheet is extended to the screen edges |
+| `LoadingFullScreen` | 0 | Loading screen picture over the whole screen (stretched) instead of 4:3 with black bars |
+| `ScoreScreen` | 3 | Score screen background: 1 = original 4:3 with black bars, 2 = sheet extended to both screen edges (border on both sides), 3 = sheet stretched to the width below its header, header and tabs in place |
 | `HeroBarEdge` | 1 | Hero portraits at the left screen edge |
 | `CinematicFullWidth` | 1 | Cutscene letterbox across the full width |
 | `MenuLayout` | 1 | Menu panels at the screen edges (0 = centred 4:3) |

@@ -41,7 +41,8 @@ static float  g_f = 0.0f;
 static double g_aspect = 4.0 / 3.0;
 static int    g_scaleOn = 0, g_scaleGameSeen = 0;
 static u32    g_screenRoot = 0;
-static int    g_loadFull = 0;   // LoadingFullScreen=1: loading screen pictures stretched over the whole screen         // vertical shift for top-anchored absolute positions (g_uiH - 0.6)     // FpsLimit: 0 = leave the frame rate alone (see InstallFpsLimit)
+static int    g_loadFull = 0;   // LoadingFullScreen=1: loading screen pictures stretched over the whole screen
+static int    g_scoreMode = 3;  // ScoreScreen: 1 = 4:3 with black bars, 2 = sheet extended to both edges, 3 = sheet stretched below its header         // vertical shift for top-anchored absolute positions (g_uiH - 0.6)     // FpsLimit: 0 = leave the frame rate alone (see InstallFpsLimit)
 static int    g_pathQuery = 1;    // AllowPathQuery: let other programs read the exe path (see ProtectProcess_hook)
 #define dlogf_(...) do { if (g_debug) logf_(__VA_ARGS__); } while (0)
 static int    g_checkedWindow = 0;
@@ -584,6 +585,8 @@ static double ReadAspect(char* src, size_t srcLen)
     g_pathQuery = GetPrivateProfileIntA(INI_SECTION, "AllowPathQuery", 1, ini);
     g_fpsLimit = GetPrivateProfileIntA(INI_SECTION, "FpsLimit", 0, ini);
     g_loadFull = GetPrivateProfileIntA(INI_SECTION, "LoadingFullScreen", 0, ini);
+    g_scoreMode = GetPrivateProfileIntA(INI_SECTION, "ScoreScreen", 3, ini);
+    if (g_scoreMode < 1 || g_scoreMode > 3) g_scoreMode = 3;
     { int pct = GetPrivateProfileIntA(INI_SECTION, "UIScale", 100, ini); if (pct < 50) pct = 50; if (pct > 150) pct = 150; g_uiScale = pct / 100.0f; }
     g_dotaOrig = GetPrivateProfileIntA(INI_SECTION, "DotAOriginal", 0, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
@@ -1084,7 +1087,8 @@ typedef struct {
     float patch[SS_ROWS][SS_LPW - 2][3];  // L columns 2..LPW-1, brightened
     float rpatch[SS_ROWS][SS_PW][3];      // R columns CR-PW..CR-1, brightened
     float gN[SS_ROWS][3], gP[SS_ROWS][3], gR[SS_ROWS][3], mix[SS_ROWS];
-    const float* R;                       // the source R tiles (for the seams)
+    const float* R;                       // the source tiles (for the seams and variant 2)
+    const float* L;
 } SsGen;
 
 static void SsTileAt(const SsGen* G, int r, int col, float* o)
@@ -1098,7 +1102,7 @@ static void SsTileAt(const SsGen* G, int r, int col, float* o)
 static int SsPrepare(SsGen* G, const SsSrc* S)
 {
     const float* L = S->L; const float* R = S->R;
-    G->R = R;
+    G->R = R; G->L = L;
     G->tileN = (float*)malloc((size_t)SS_ROWS * SS_NW * 3 * sizeof(float));
     G->tileW = (float*)malloc((size_t)SS_ROWS * SS_WW * 3 * sizeof(float));
     const int ww = SS_WW / 2;
@@ -1237,9 +1241,9 @@ static void SsSeam(float* img, int w, int x0, int dir, int n, const float (*ref)
 // left filler:  [top rows: R columns CR-1..BR mirrored (up to BW), then filler (wl in all) | L edge copy (PW-2)]
 // RGB, SS_ROWS rows each. The R block is toned to the filler below it, so the group's top no longer meets the
 // lighter filler in a horizontal seam.
-static void SsBuild(const SsGen* G, int wt, int wl, float* rf, float* lf)
+static void SsBuild(const SsGen* G, int wt, int wl, int leftGroup, float* rf, float* lf)
 {
-    const int lw = SS_LFW(wl), rw = SS_RFW(wt), bw = wl < SS_BW ? wl : SS_BW;
+    const int lw = SS_LFW(wl), rw = SS_RFW(wt), bw = !leftGroup ? 0 : wl < SS_BW ? wl : SS_BW;
     const float* R = G->R;
     float t3[3];
     #define PX(img, w, r, x) (&(img)[((size_t)(r) * (w) + (x)) * 3])
@@ -1320,7 +1324,7 @@ static void SsBuild(const SsGen* G, int wt, int wl, float* rf, float* lf)
     for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++)       // left filler, right end: the left edge copy
         ref[r][c] = (G->patch[r][0][c] + G->patch[r][1][c]) / 2;
     SsSeam(lf, lw, wl - 1, -1, nl2, ref, NULL);
-    if (wl - bw >= 4) {                                                 // left filler, left end: the block / the group
+    if (leftGroup && wl - bw >= 4) {                                    // left filler, left end: the block / the group
         for (int r = 0; r < SS_ROWS; r++) {
             xs[r] = r < SS_SPLIT ? bw : 0;
             for (int c = 0; c < 3; c++) ref[r][c] = r < SS_SPLIT ? (PX(lf, lw, r, bw - 1)[c] + PX(lf, lw, r, bw - 2 < 0 ? 0 : bw - 2)[c]) / 2 : RAVG(r, SS_CR, c);
@@ -1331,8 +1335,8 @@ static void SsBuild(const SsGen* G, int wt, int wl, float* rf, float* lf)
     #undef PX
 }
 
-// RGB rows [row0, row0 + h) of a cw-wide image -> paletted BLP1 with mipmaps, width rounded up to a power of two
-static uint8_t* SsMakeBlp(const float* rgb, int cw, int row0, int h, const uint8_t* pal, const uint8_t* hdr, DWORD* outN, int* outW)
+// RGB rows [row0, row0 + h), columns [x0, x0 + cw) of a stride-wide image -> paletted BLP1 with mipmaps, width rounded up to a power of two
+static uint8_t* SsMakeBlp(const float* rgb, int stride, int x0, int cw, int row0, int h, const uint8_t* pal, const uint8_t* hdr, DWORD* outN, int* outW)
 {
     int W = 1; while (W < cw) W <<= 1;
     static uint8_t lut[1 << 18]; static uint8_t have[1 << 18]; static const uint8_t* lutPal;
@@ -1344,7 +1348,7 @@ static uint8_t* SsMakeBlp(const float* rgb, int cw, int row0, int h, const uint8
     if (!o || !cur) { free(o); free(cur); return NULL; }
     for (int y = 0; y < h; y++)
         for (int x = 0; x < W; x++)
-            memcpy(cur + ((size_t)y * W + x) * 3, rgb + ((size_t)(row0 + y) * cw + (x < cw ? x : cw - 1)) * 3, 12);
+            memcpy(cur + ((size_t)y * W + x) * 3, rgb + ((size_t)(row0 + y) * stride + x0 + (x < cw ? x : cw - 1)) * 3, 12);
     memcpy(o, hdr, 28);
     *(DWORD*)(o + 12) = W; *(DWORD*)(o + 16) = h;
     memcpy(o + 156, pal, 1024);
@@ -1419,14 +1423,19 @@ static const char* const kSsTex[4] = { "RF1", "RF2", "LF1", "LF2" };
 #define SS_TEXDIR "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\W3TW-ScoreSide-"
 
 // the model with the extended sheet; texW: widths of the RF / LF textures, wt / wl as in SsBuild
+// one quad of the background: material, x range, top tile (y 0.2..0.6, 512 rows) or bottom (0..0.2, 256 rows),
+// u range in texels of a texture tw wide, v range in texel rows
+typedef struct { int mat; float x0, x1; int top; float u0, u1, v0, v1, tw; } SsQuad;
+static uint8_t* SsBuildModelQ(const uint8_t* d, DWORD n, const SsQuad* q, int nq, const char (*tex)[16], int ntex, DWORD* outN);
+
 static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl, int rfW, int lfW, DWORD* outN)
 {
     if (n < 16 || memcmp(d, "MDLX", 4)) return NULL;
     const float K = 0.4f / 512;
     // quads: tex/material, x0, x1, top-tile?, u0, u1 (texels), v0, v1 (texel rows), texture width
-    struct Q { int mat; float x0, x1; int top; float u0, u1, v0, v1, tw; } q[16];
+    SsQuad q[16];
     int nq = 0;
-    #define SQ(m_, a_, b_, t_, c_, d_, e_, f_, w_) q[nq++] = (struct Q){ m_, a_, b_, t_, c_, d_, e_, f_, w_ }
+    #define SQ(m_, a_, b_, t_, c_, d_, e_, f_, w_) q[nq++] = (SsQuad){ m_, a_, b_, t_, c_, d_, e_, f_, w_ }
     float lu1 = (float)SS_LFW(wl);
     // originals (geosets 0..3, in place)
     SQ(0, SS_LPW * K, 0.4f, 1, SS_LPW, 512, 0, 512, 512);
@@ -1446,6 +1455,17 @@ static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl,
     SQ(6, 0.4f + (SS_CR - SS_PW) * K, 0.8f + e - gw, 0, 0, SS_PW + wt, 0, 256, rfW);
     SQ(8, -e + gw, SS_LPW * K, 0, 0, lu1, 0, 256, lfW);
     #undef SQ
+    char tex[4][16];
+    for (int i = 0; i < 4; i++) snprintf(tex[i], 16, "%s", kSsTex[i]);
+    return SsBuildModelQ(d, n, q, nq, (const char (*)[16])tex, 4, outN);
+}
+
+// the model with quads q (the first four replace the original tiles' geosets) and textures 5.. named by tex
+static uint8_t* SsBuildModelQ(const uint8_t* d, DWORD n, const SsQuad* q, int nq, const char (*tex)[16], int ntex, DWORD* outN)
+{
+    if (n < 16 || memcmp(d, "MDLX", 4) || nq < 4) return NULL;
+    const float K = 0.4f / 512;
+    #undef SQ
     const int added = nq - 4;
     // find chunks
     DWORD p = 4, gp = 0, gsz = 0, mp = 0, msz = 0, tp = 0, tsz = 0;
@@ -1463,7 +1483,7 @@ static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl,
     if (g0sz < 12 || g0sz > gsz) return NULL;
     { float *v, *uv; DWORD *m, cnt; uint8_t* t = (uint8_t*)malloc(g0sz); memcpy(t, d + gp + 8, g0sz);
       int ok = SsGeosetParts(t, g0sz, &v, &uv, &m, &cnt); free(t); if (!ok) return NULL; }
-    DWORD on = n + 4 * 48 + 4 * 268 + added * g0sz;
+    DWORD on = n + ntex * 48 + ntex * 268 + added * g0sz;
     uint8_t* o = (uint8_t*)malloc(on);
     if (!o) return NULL;
     DWORD w = 0; p = 4; memcpy(o, d, 4); w = 4;
@@ -1471,26 +1491,26 @@ static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl,
         DWORD sz = *(DWORD*)(d + p + 4);
         memcpy(o + w, d + p, 8 + sz);
         if (p == mp) {
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < ntex; i++) {
                 uint8_t* m = o + w + 8 + sz + i * 48;
                 memcpy(m, d + mp + 8, 48);
                 *(DWORD*)(m + 32) = 5 + i;          // layer texture id
             }
-            *(DWORD*)(o + w + 4) = sz + 4 * 48; w += 8 + sz + 4 * 48;
+            *(DWORD*)(o + w + 4) = sz + ntex * 48; w += 8 + sz + ntex * 48;
         } else if (p == tp) {
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < ntex; i++) {
                 uint8_t* t = o + w + 8 + sz + i * 268;
                 memset(t, 0, 268);
-                snprintf((char*)t + 4, 260, SS_TEXDIR "%s.blp", kSsTex[i]);
+                snprintf((char*)t + 4, 260, SS_TEXDIR "%s.blp", tex[i]);
             }
-            *(DWORD*)(o + w + 4) = sz + 4 * 268; w += 8 + sz + 4 * 268;
+            *(DWORD*)(o + w + 4) = sz + ntex * 268; w += 8 + sz + ntex * 268;
         } else if (p == gp) {
             uint8_t* base = o + w + 8;
             // originals 0..3 edited in place
             DWORD g = 0;
             for (int i = 0; i < 4 && g + 4 <= sz; i++) {
                 DWORD s = *(DWORD*)(base + g);
-                struct Q* Q = &q[i];
+                const SsQuad* Q = &q[i];
                 float y0 = Q->top ? 0.6f - Q->v1 * K : 0.2f - Q->v1 * K, y1 = Q->top ? 0.6f - Q->v0 * K : 0.2f - Q->v0 * K;
                 float th = Q->top ? 512.0f : 256.0f;
                 SsSetQuad(base + g, s, Q->x0, Q->x1, y0, y1, Q->u0 / Q->tw, Q->u1 / Q->tw, Q->v0 / th, Q->v1 / th, Q->mat);
@@ -1521,7 +1541,7 @@ static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl,
             for (int i = 4; i < nq; i++) {
                 uint8_t* t = base + sz + (i - 4) * g0sz;
                 memcpy(t, d + gp + 8, g0sz);
-                struct Q* Q = &q[i];
+                const SsQuad* Q = &q[i];
                 float y0 = Q->top ? 0.6f - Q->v1 * K : 0.2f - Q->v1 * K, y1 = Q->top ? 0.6f - Q->v0 * K : 0.2f - Q->v0 * K;
                 float th = Q->top ? 512.0f : 256.0f;
                 SsSetQuad(t, g0sz, Q->x0, Q->x1, y0, y1, Q->u0 / Q->tw, Q->u1 / Q->tw, Q->v0 / th, Q->v1 / th, Q->mat);
@@ -1531,6 +1551,104 @@ static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl,
         p += 8 + sz;
     }
     *outN = w;
+    return o;
+}
+
+// ---- variant 2 (LoadingFullScreen=2): the sheet stretched to the screen width --------------------------------------
+// Below the header the sheet is stretched over the width, except its right border group, which keeps its width at the
+// right screen edge. The top (wood bar, tabs, header cells) is the extended layout of variant 1 without the mirrored
+// left group, so tabs and cells stay where the score screen's texts are; it is toned to the stretched sheet below it
+// and crossfades into it over a few rows of plain parchment.
+#define SS_V2B0 146
+#define SS_V2B1 182
+#define SS_V2W(wt) (1024 + 2 * (wt))
+// lf: SsBuild's left filler made with wl = wt + 2 and no left group; returns SS_ROWS x SS_V2W(wt) RGB
+static float* SsCompose2(const SsGen* G, int wt, const float* rf, const float* lf)
+{
+    const float* L = G->L; const float* R = G->R;
+    const int W = SS_V2W(wt), rw = SS_RFW(wt), lw = wt + SS_LPW, gx = W - (512 - SS_CR), sw = 512 + SS_CR - 2;
+    float* E = (float*)malloc(sizeof(float) * 3 * (size_t)SS_ROWS * W);
+    float* gg = (float*)malloc(sizeof(float) * 3 * (size_t)W * 2);
+    if (!E || !gg) { free(E); free(gg); return NULL; }
+    #define P(img, w, r, x) (&(img)[((size_t)(r) * (w) + (x)) * 3])
+    // the stretched sheet (rows from just above the crossfade)
+    for (int r = SS_V2B0 - 8; r < SS_ROWS; r++)
+        for (int X = 0; X < W; X++) {
+            float* o = P(E, W, r, X);
+            if (X >= gx) { memcpy(o, P(R, 512, r, X - gx + SS_CR), 12); continue; }
+            float cs = 2 + (X + 0.5f) * sw / gx - 0.5f;
+            int c0 = (int)floorf(cs); float f = cs - c0;
+            int c1 = c0 + 1 < 512 + SS_CR ? c0 + 1 : c0;
+            const float* a = c0 < 512 ? P(L, 512, r, c0) : P(R, 512, r, c0 - 512);
+            const float* b = c1 < 512 ? P(L, 512, r, c1) : P(R, 512, r, c1 - 512);
+            for (int c = 0; c < 3; c++) o[c] = a[c] + (b[c] - a[c]) * f;
+        }
+    // the extended top, into a band buffer
+    float* B = (float*)malloc(sizeof(float) * 3 * (size_t)SS_V2B1 * W);
+    if (!B) { free(E); free(gg); return NULL; }
+    for (int r = 0; r < SS_V2B1; r++)
+        for (int X = 0; X < W; X++) {
+            const float* s;
+            if (X < lw) s = P(lf, lw, r, X);
+            else if (X < wt + 512) s = P(L, 512, r, X - wt);
+            else {
+                int xr = X - wt - 512;
+                if (xr >= SS_CR + wt) s = P(R, 512, r, xr - wt);
+                else if (r >= SS_SPLIT) s = xr < SS_CR - SS_PW ? P(R, 512, r, xr) : P(rf, rw, r, xr - (SS_CR - SS_PW));
+                else s = xr < SS_BR ? P(R, 512, r, xr) : P(rf, rw, r, SS_PW + xr - SS_BR);
+            }
+            memcpy(P(B, W, r, X), s, 12);
+        }
+    // tone the band to the stretched sheet right below it, per column (smoothed)
+    float* tmp = gg + 3 * W;
+    for (int X = 0; X < W; X++)
+        for (int c = 0; c < 3; c++) {
+            double up = 0, dn = 0;
+            for (int r = SS_V2B0 - 8; r < SS_V2B0; r++) up += P(B, W, r, X)[c];
+            for (int r = SS_V2B0; r < SS_V2B0 + 8; r++) dn += P(E, W, r, X)[c];
+            float g = (float)(dn / (up > 1 ? up : 1));
+            gg[X * 3 + c] = g < 0.7f ? 0.7f : g > 1.4f ? 1.4f : g;
+        }
+    for (int c = 0; c < 3; c++) SsBlurLine(gg + c, W, 3, 16, tmp);
+    for (int r = 66; r < SS_V2B1; r++) {
+        float k = r < 140 ? (r - 66) / 74.0f : 1.0f;
+        for (int X = 0; X < W; X++) for (int c = 0; c < 3; c++) {
+            float* p = P(B, W, r, X); float v = p[c] * (1 + (gg[X * 3 + c] - 1) * k); p[c] = v > 255 ? 255 : v;
+        }
+    }
+    // band on top, crossfade, stretched sheet below
+    for (int r = 0; r < SS_V2B1; r++) {
+        float t = r < SS_V2B0 ? 0.0f : (float)(r - SS_V2B0) / (SS_V2B1 - SS_V2B0);
+        t = t * t * (3 - 2 * t);
+        for (int X = 0; X < W; X++) for (int c = 0; c < 3; c++) {
+            float* o = P(E, W, r, X);
+            o[c] = r < SS_V2B0 - 8 ? P(B, W, r, X)[c] : P(B, W, r, X)[c] * (1 - t) + o[c] * t;
+        }
+    }
+    #undef P
+    free(B); free(gg);
+    return E;
+}
+
+// the model for variant 2: the composed sheet in tiles of 512 texels (top 512 rows / bottom 256 rows each);
+// texW[i]: the texture widths of the tiles (top and bottom of a column share it)
+static uint8_t* SsBuildModel2(const uint8_t* d, DWORD n, float e, int wt, const int* texW, DWORD* outN)
+{
+    const int W = SS_V2W(wt), ncol = (W + 511) / 512;
+    SsQuad* q = (SsQuad*)malloc(sizeof(SsQuad) * 2 * ncol);
+    char (*tex)[16] = (char (*)[16])malloc(16 * 2 * ncol);
+    if (!q || !tex) { free(q); free(tex); return NULL; }
+    const float s = (0.8f + 2 * e) / W;
+    for (int i = 0; i < ncol; i++) {
+        int x0 = i * 512, cw = W - x0 < 512 ? W - x0 : 512;
+        for (int t = 0; t < 2; t++) {
+            int k = i * 2 + t;
+            q[k] = (SsQuad){ 5 + k, -e + x0 * s, -e + (x0 + cw) * s, !t, 0, (float)cw, 0, t ? 256.0f : 512.0f, (float)texW[i] };
+            snprintf(tex[k], 16, "T%d%c", i, t ? 'B' : 'A');
+        }
+    }
+    uint8_t* o = SsBuildModelQ(d, n, q, 2 * ncol, (const char (*)[16])tex, 2 * ncol, outN);
+    free(q); free(tex);
     return o;
 }
 
@@ -1557,12 +1675,13 @@ static int SsWrite(const char* path, const uint8_t* b, DWORD n)
     return ok;
 }
 // the extended sheet: model plus its four filler textures written to the cache folder; 0 if it can't be made
-static uint8_t* ExtendScoreBackground(HANDLE mpq, DWORD scope, const uint8_t* model, DWORD n, float e, DWORD* outN)
+static uint8_t* ExtendScoreBackground(HANDLE mpq, DWORD scope, const uint8_t* model, DWORD n, float e, int variant, DWORD* outN)
 {
-    int wt = (int)lroundf(e * 1280.0f), wl = wt - (512 - SS_CR) + 2, lw = SS_LFW(wl), rw = SS_RFW(wt);
-    if (wl < 8) return NULL;                                  // too narrow (about 3:2 and below)
+    // variant 1: the sheet extended with fillers, border at both edges; variant 2: the sheet stretched below the header
+    int wt = (int)lroundf(e * 1280.0f), wl = variant == 2 ? wt + 2 : wt - (512 - SS_CR) + 2, lw = SS_LFW(wl), rw = SS_RFW(wt);
+    if (wt - (512 - SS_CR) + 2 < 8) return NULL;              // too narrow (about 3:2 and below)
     static const char* const tiles[4] = { "L1", "R1", "L2", "R2" };
-    SsSrc S = { 0 }; SsGen* G = NULL; float *rf = NULL, *lf = NULL; uint8_t* o = NULL;
+    SsSrc S = { 0 }; SsGen* G = NULL; float *rf = NULL, *lf = NULL, *E = NULL; uint8_t* o = NULL;
     S.L = (float*)malloc(sizeof(float) * SS_ROWS * 512 * 3); S.R = (float*)malloc(sizeof(float) * SS_ROWS * 512 * 3);
     G = (SsGen*)calloc(1, sizeof(SsGen));
     int ok = S.L && S.R && G;
@@ -1579,21 +1698,36 @@ static uint8_t* ExtendScoreBackground(HANDLE mpq, DWORD scope, const uint8_t* mo
         rf = (float*)malloc(sizeof(float) * SS_ROWS * rw * 3); lf = (float*)malloc(sizeof(float) * SS_ROWS * lw * 3);
         ok = rf && lf;
     }
-    int rfW = 0, lfW = 0;
-    if (ok) {
-        SsBuild(G, wt, wl, rf, lf);
-        char dir[MAX_PATH], path[MAX_PATH]; SsCacheDir(dir);
+    char dir[MAX_PATH], path[MAX_PATH]; SsCacheDir(dir);
+    if (ok) SsBuild(G, wt, wl, variant != 2, rf, lf);
+    if (ok && variant != 2) {
+        int rfW = 0, lfW = 0;
         for (int i = 0; i < 4 && ok; i++) {
             DWORD bn = 0; int W = 0, top = !(i & 1);
-            uint8_t* b = SsMakeBlp(i < 2 ? rf : lf, i < 2 ? rw : lw, top ? 0 : 512, top ? 512 : 256, S.pal[top ? 0 : 1], S.hdr[top ? 0 : 1], &bn, &W);
+            const float* img = i < 2 ? rf : lf; int iw = i < 2 ? rw : lw;
+            uint8_t* b = SsMakeBlp(img, iw, 0, iw, top ? 0 : 512, top ? 512 : 256, S.pal[top ? 0 : 1], S.hdr[top ? 0 : 1], &bn, &W);
             snprintf(path, sizeof path, "%s\\ScoreSide-%s.blp", dir, kSsTex[i]);
             ok = b && SsWrite(path, b, bn);
             free(b);
             if (i < 2) rfW = W; else lfW = W;
         }
+        if (ok) o = SsBuildModel(model, n, e, wt, wl, rfW, lfW, outN);
+    } else if (ok) {
+        E = SsCompose2(G, wt, rf, lf);
+        const int W = SS_V2W(wt), ncol = (W + 511) / 512;
+        int texW[64];
+        ok = E && ncol <= 64;
+        for (int i = 0; i < ncol && ok; i++)
+            for (int t = 0; t < 2 && ok; t++) {
+                DWORD bn = 0; int x0 = i * 512, cw = W - x0 < 512 ? W - x0 : 512;
+                uint8_t* b = SsMakeBlp(E, W, x0, cw, t ? 512 : 0, t ? 256 : 512, S.pal[t], S.hdr[t], &bn, &texW[i]);
+                snprintf(path, sizeof path, "%s\\ScoreSide-T%d%c.blp", dir, i, t ? 'B' : 'A');
+                ok = b && SsWrite(path, b, bn);
+                free(b);
+            }
+        if (ok) o = SsBuildModel2(model, n, e, wt, texW, outN);
     }
-    if (ok) o = SsBuildModel(model, n, e, wt, wl, rfW, lfW, outN);
-    free(S.L); free(S.R); if (G) { free(G->tileN); free(G->tileW); } free(G); free(rf); free(lf);
+    free(S.L); free(S.R); if (G) { free(G->tileN); free(G->tileW); } free(G); free(rf); free(lf); free(E);
     return o;
 }
 static int ServeScoreSide(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
@@ -1617,7 +1751,7 @@ static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDL
     float e = (float)((0.6 * g_aspect - 0.8) * 0.5);
     int ext = 0;
     uint8_t* o = NULL;
-    if (ok) { o = ExtendScoreBackground(mpq, scope, buf, n, e, &on); ext = o != NULL; }
+    if (ok) { o = ExtendScoreBackground(mpq, scope, buf, n, e, g_scoreMode == 3 ? 2 : 1, &on); ext = o != NULL; }
     if (ok && !o) o = AddSideGeosets(buf, n, e, 0.10f, &on);
     free(buf);
     if (!o) { logf_("score screen background not adapted"); return 0; }
@@ -1629,14 +1763,14 @@ static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDL
     if (!ok) return 0;
     BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
     if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
-    logf_("score screen background: %s (%d)", ext ? "sheet extended" : "sides covered", r);
+    logf_("score screen background: %s (%d)", !ext ? "sides covered" : g_scoreMode == 3 ? "sheet stretched" : "sheet extended", r);
     return r;
 }
 static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
-    if (g_loadFull && g_aspect > 1.34 && SameName(name, "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\ScoreScreen-Background.mdx"))
+    if (g_scoreMode >= 2 && g_aspect > 1.34 && SameName(name, "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\ScoreScreen-Background.mdx"))
         return ServeScoreBackground(mpq, name, scope, ph);
-    if (g_loadFull && g_aspect > 1.34 && ServeScoreSide(mpq, name, scope, ph)) return 1;
+    if (g_scoreMode >= 2 && g_aspect > 1.34 && ServeScoreSide(mpq, name, scope, ph)) return 1;
     int dota = g_dotaPending && g_loadModel[0] && SameName(name, g_loadModel);
     int custom = !dota && g_loadModel[0] && SameName(name, g_loadModel);
     static const char kBg[] = "UI\\Glues\\Loading\\Backgrounds\\", kGen[] = "UI\\Glues\\Loading\\Load-Generic\\";
