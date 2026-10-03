@@ -826,7 +826,8 @@ static void DotAFrameEvent(u32 frame, u32 parent)
         if (g_dotaMode) SetDotAMode(0);
         if (g_dotaRun) SetDotARun(0);
     }
-    if (vt == 0x967460) SetUIScaleActive(0);
+    // the score screen keeps its original size: its parts can be placed on it before the screen frame itself
+    if (vt == 0x967460 || VtRva(parent) == 0x967460) SetUIScaleActive(0);
     if (g_scaleOn) {
         if (IsGameUIRoot(parent)) g_scaleGameSeen = 1;
         else if (g_scaleGameSeen && !g_loadingActive && IsScreenRoot(parent)) {
