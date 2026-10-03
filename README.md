@@ -97,6 +97,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.8.1** — With `LoadingFullScreen=1` the score screen's sheet is extended to the screen edges instead of the bars being covered. With `UIScale` the score screen's parts stay in their places on its background.
 - **1.8** — `UIScale`: size of the in-game interface in percent. `LoadingFullScreen`: loading screen picture over the whole screen. Movie subtitles (Subtitles on in the game's options) are shown with the movie renderer too, drawn by the renderer itself, so RTX HDR stays on; `MovieSubtitleSize` and `MovieSubtitleBrightness` set their size and brightness. With `LoadingFullScreen=1` the black bars beside the score screen are filled.
 - **1.7.1** — On 4:3 screens the movie options (native mode, movie renderer, external player) and `FpsLimit` now work too; before, the mod did nothing there.
 - **1.7** — DracoL1ch's DotA Allstars maps with the mod on (`DotAOriginal=0`, now the default): their interface is laid out over the wide screen, the 3D view is the one of the map's WideScreen option, over the full screen height, with a black backing under the console.

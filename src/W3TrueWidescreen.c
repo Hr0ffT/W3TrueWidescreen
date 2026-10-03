@@ -2675,7 +2675,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.8  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.8.1  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
