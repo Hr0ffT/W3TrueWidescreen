@@ -47,7 +47,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `FovFix` | 1 | Original 4:3 vertical field of view (0 = engine default, zoomed in) |
 | `CameraZoomOut` | 1.0 | Extra zoom-out for the game camera |
 | `UIScale` | 100 | In-game interface size in percent (50..150); menus keep their size |
-| `LoadingFullScreen` | 0 | Loading screen picture over the whole screen (stretched) instead of 4:3 with black bars; the bars beside the score screen are filled |
+| `LoadingFullScreen` | 0 | Loading screen picture over the whole screen (stretched) instead of 4:3 with black bars; the score screen's sheet is extended to the screen edges |
 | `HeroBarEdge` | 1 | Hero portraits at the left screen edge |
 | `CinematicFullWidth` | 1 | Cutscene letterbox across the full width |
 | `MenuLayout` | 1 | Menu panels at the screen edges (0 = centred 4:3) |

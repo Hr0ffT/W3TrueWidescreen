@@ -982,6 +982,630 @@ static uint8_t* AddSideGeosets(const uint8_t* d, DWORD n, float e, float strip, 
     *outN = n + en;
     return o;
 }
+// ---- score screen: extended background ------------------------------------------------------------------------
+// The score screen background is a 0.8 x 0.6 sheet made of four 512-texel tiles (L1 R1 on top, L2 R2 below).
+// With LoadingFullScreen the sheet is extended to the screen edges: its right border group (gold line, torn edge,
+// frame) moves to the right screen edge, a mirrored copy goes to the left edge, and the gaps are filled with
+// textures built here from the game's own tiles: plain sheet with the header line, the wood bar on top and the
+// bottom border, tone-matched to their neighbours so no seams show. The left edge of the sheet is darkened in the
+// original picture; those columns are brightened in a copy that sits at the end of the left filler.
+#define SS_ROWS 768                 // L1/R1 (512) over L2/R2 (256)
+#define SS_S0 70                    // narrow source: L columns between the first two header cells
+#define SS_S1 160
+#define SS_SPLIT 88                 // R rows above: the right group starts at SS_BR (the metal bracket), below: at SS_CR
+#define SS_CR 431
+#define SS_BR 343
+#define SS_PW 48                    // R columns CR-PW..CR-1 are copied (brightened) into the right filler
+#define SS_LPW 160                  // L columns 2..LPW-1 are copied (brightened) into the left filler
+#define SS_LDIM 0.12                // ... keeping a gentle darkening towards the edge (this much at column 2)
+#define SS_B0 141                   // plain parchment rows
+#define SS_B1 706
+#define SS_X0 136                   // crossfade from the narrow source to the wide one
+#define SS_X1 146
+#define SS_NW ((SS_S1 - SS_S0) * 2)
+#define SS_WW ((512 - SS_S0 + 420) * 2)
+
+typedef struct { float* L; float* R; uint8_t pal[2][1024]; uint8_t hdr[2][28]; } SsSrc;
+
+// paletted BLP1 (what the score screen tiles are) -> RGB floats into dst rows [row0, row0 + h)
+static int SsReadBlp(const uint8_t* d, DWORD n, float* dst, int row0, int wantH, uint8_t* pal, uint8_t* hdr)
+{
+    if (n < 156 + 1024 || memcmp(d, "BLP1", 4)) return 0;
+    DWORD comp = *(DWORD*)(d + 4), w = *(DWORD*)(d + 12), h = *(DWORD*)(d + 16), off = *(DWORD*)(d + 28);
+    if (comp != 1 || w != 512 || (int)h != wantH || off + w * h > n) return 0;
+    const uint8_t* p = d + 156;
+    for (DWORD y = 0; y < h; y++)
+        for (DWORD x = 0; x < w; x++) {
+            const uint8_t* c = p + d[off + y * w + x] * 4;           // BGRA
+            float* o = dst + ((row0 + y) * 512 + x) * 3;
+            o[0] = c[2]; o[1] = c[1]; o[2] = c[0];
+        }
+    if (pal) memcpy(pal, p, 1024);
+    if (hdr) memcpy(hdr, d, 28);
+    return 1;
+}
+
+// centred box blur with clamped edges, 3 passes (about a Gaussian), over n elements `stride` floats apart
+static void SsBlurLine(float* a, int n, int stride, int r, float* tmp)
+{
+    for (int it = 0; it < 3; it++) {
+        double s = 0;
+        for (int k = -r; k <= r; k++) s += a[(k < 0 ? 0 : k >= n ? n - 1 : k) * stride];
+        for (int i = 0; i < n; i++) {
+            tmp[i] = (float)(s / (2 * r + 1));
+            int out = i - r, in = i + r + 1;
+            s += a[(in >= n ? n - 1 : in) * stride] - a[(out < 0 ? 0 : out) * stride];
+        }
+        for (int i = 0; i < n; i++) a[i * stride] = tmp[i];
+    }
+}
+
+static int SsKind(int r)            // 0: gain 1 (wood, bottom edge), 1: measured (parchment), 2: interpolated
+{
+    if (r < 66 || r >= 746) return 0;
+    if ((r >= 78 && r < 98) || (r >= SS_B0 && r < 746)) return 1;
+    return 2;
+}
+
+// per-row gain that brings `own` (the filler's tone) to `target`, smooth over rows
+static void SsGains(const float* target, const float* own, float* g)
+{
+    static float num[SS_ROWS], den[SS_ROWS], tmp[SS_ROWS];
+    for (int ch = 0; ch < 3; ch++) {
+        for (int r = 0; r < SS_ROWS; r++) {
+            float w = SsKind(r) == 1 ? 1.0f : 0.0f;
+            float o = own[r * 3 + ch]; if (o < 1) o = 1;
+            num[r] = target[r * 3 + ch] / o * w; den[r] = w;
+        }
+        SsBlurLine(num, SS_ROWS, 1, 24, tmp); SsBlurLine(den, SS_ROWS, 1, 24, tmp);
+        float col[SS_ROWS]; int ok[SS_ROWS];
+        for (int r = 0; r < SS_ROWS; r++) {
+            int k = SsKind(r);
+            ok[r] = k != 2;
+            col[r] = k == 1 ? num[r] / (den[r] > 1e-6f ? den[r] : 1e-6f) : 1.0f;
+        }
+        for (int r = 0; r < SS_ROWS; r++) {
+            float v = col[r];
+            if (!ok[r]) {
+                int a = r, b = r;
+                while (a >= 0 && !ok[a]) a--;
+                while (b < SS_ROWS && !ok[b]) b++;
+                if (a < 0) v = col[b]; else if (b >= SS_ROWS) v = col[a];
+                else v = col[a] + (col[b] - col[a]) * (float)(r - a) / (float)(b - a);
+            }
+            g[r * 3 + ch] = v < 0.5f ? 0.5f : v > 1.6f ? 1.6f : v;
+        }
+    }
+}
+
+typedef struct {
+    float* tileN;                   // SS_ROWS x SS_NW
+    float* tileW;                   // SS_ROWS x SS_WW
+    float patch[SS_ROWS][SS_LPW - 2][3];  // L columns 2..LPW-1, brightened
+    float rpatch[SS_ROWS][SS_PW][3];      // R columns CR-PW..CR-1, brightened
+    float gN[SS_ROWS][3], gP[SS_ROWS][3], gR[SS_ROWS][3], mix[SS_ROWS];
+    const float* R;                       // the source R tiles (for the seams)
+} SsGen;
+
+static void SsTileAt(const SsGen* G, int r, int col, float* o)
+{
+    const float* a = G->tileN + ((size_t)r * SS_NW + col % SS_NW) * 3;
+    const float* b = G->tileW + ((size_t)r * SS_WW + col % SS_WW) * 3;
+    float m = G->mix[r];
+    for (int c = 0; c < 3; c++) o[c] = a[c] * (1 - m) + b[c] * m;
+}
+
+static int SsPrepare(SsGen* G, const SsSrc* S)
+{
+    const float* L = S->L; const float* R = S->R;
+    G->R = R;
+    G->tileN = (float*)malloc((size_t)SS_ROWS * SS_NW * 3 * sizeof(float));
+    G->tileW = (float*)malloc((size_t)SS_ROWS * SS_WW * 3 * sizeof(float));
+    const int ww = SS_WW / 2;
+    float* low = (float*)malloc((size_t)SS_ROWS * ww * 3 * sizeof(float));
+    float* tmp = (float*)malloc(sizeof(float) * (SS_ROWS > ww ? SS_ROWS : ww));
+    if (!G->tileN || !G->tileW || !low || !tmp) { free(low); free(tmp); return 0; }
+    // narrow source, its columns brought to one tone, mirrored
+    const int nw = SS_S1 - SS_S0;
+    double cm[SS_S1 - SS_S0][3] = {{0}}, all[3] = {0};
+    for (int r = SS_B0; r < SS_B1; r++)
+        for (int x = 0; x < nw; x++)
+            for (int c = 0; c < 3; c++) cm[x][c] += L[(r * 512 + SS_S0 + x) * 3 + c];
+    for (int x = 0; x < nw; x++) for (int c = 0; c < 3; c++) all[c] += cm[x][c] / nw;
+    for (int r = 0; r < SS_ROWS; r++)
+        for (int x = 0; x < nw; x++)
+            for (int c = 0; c < 3; c++) {
+                float v = L[(r * 512 + SS_S0 + x) * 3 + c] * (float)(all[c] / (cm[x][c] > 1 ? cm[x][c] : 1));
+                G->tileN[((size_t)r * SS_NW + x) * 3 + c] = v;
+                G->tileN[((size_t)r * SS_NW + SS_NW - 1 - x) * 3 + c] = v;
+            }
+    // wide source: the sheet from L column S0 to R column 420, low frequencies removed, mirrored
+    #define SSW(r, x, c) ((x) < 512 - SS_S0 ? L[((r) * 512 + SS_S0 + (x)) * 3 + (c)] : R[((r) * 512 + (x) - (512 - SS_S0)) * 3 + (c)])
+    for (int r = 0; r < SS_ROWS; r++)
+        for (int x = 0; x < ww; x++)
+            for (int c = 0; c < 3; c++) low[((size_t)r * ww + x) * 3 + c] = SSW(r < SS_B1 ? r : SS_B1 - 1, x, c);
+    for (int x = 0; x < ww; x++) for (int c = 0; c < 3; c++) SsBlurLine(low + x * 3 + c, SS_ROWS, ww * 3, 16, tmp);
+    for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++) SsBlurLine(low + (size_t)r * ww * 3 + c, ww, 3, 16, tmp);
+    double lm[3] = {0};
+    for (int r = SS_B0; r < SS_B1; r++) for (int x = 0; x < ww; x++) for (int c = 0; c < 3; c++) lm[c] += low[((size_t)r * ww + x) * 3 + c];
+    for (int c = 0; c < 3; c++) lm[c] /= (double)(SS_B1 - SS_B0) * ww;
+    for (int r = 0; r < SS_ROWS; r++) {
+        int lr = r < SS_B0 ? SS_B0 : r;
+        for (int x = 0; x < ww; x++)
+            for (int c = 0; c < 3; c++) {
+                float lo = low[((size_t)lr * ww + x) * 3 + c];
+                float v = SSW(r, x, c) * (float)(lm[c] / (lo > 1 ? lo : 1));
+                G->tileW[((size_t)r * SS_WW + x) * 3 + c] = v;
+                G->tileW[((size_t)r * SS_WW + SS_WW - 1 - x) * 3 + c] = v;
+            }
+    }
+    #undef SSW
+    free(low); free(tmp);
+    // tone of the filler per row
+    static float own[SS_ROWS][3], nearT[SS_ROWS][3], pref[SS_ROWS][3], rref[SS_ROWS][3];
+    for (int r = 0; r < SS_ROWS; r++) {
+        float m = (float)(r - SS_X0) / (SS_X1 - SS_X0);
+        G->mix[r] = m < 0 ? 0 : m > 1 ? 1 : m;
+        for (int c = 0; c < 3; c++) {
+            double a = 0, b = 0;
+            for (int x = 0; x < SS_NW; x++) a += G->tileN[((size_t)r * SS_NW + x) * 3 + c];
+            for (int x = 0; x < SS_WW; x++) b += G->tileW[((size_t)r * SS_WW + x) * 3 + c];
+            own[r][c] = (float)(a / SS_NW * (1 - G->mix[r]) + b / SS_WW * G->mix[r]);
+        }
+    }
+    // brightened copies of the sheet's left edge and of the right edge of the part that stays
+    for (int side = 0; side < 2; side++) {
+        const float* T = side ? R : L;
+        int c0 = side ? SS_CR - SS_PW : 2, c1 = side ? SS_CR : SS_LPW, rc = side ? SS_CR - SS_PW - 4 : SS_LPW;   // rc: reference columns
+        double m[512][3];
+        for (int x = 0; x < 512; x++) for (int c = 0; c < 3; c++) m[x][c] = 0;
+        for (int r = SS_B0; r < SS_B1; r++) for (int x = (c0 < rc ? c0 : rc); x < (c1 > rc + 4 ? c1 : rc + 4); x++) for (int c = 0; c < 3; c++) m[x][c] += T[(r * 512 + x) * 3 + c];
+        for (int c = 0; c < 3; c++) {
+            double ref = (m[rc][c] + m[rc + 1][c] + m[rc + 2][c] + m[rc + 3][c]) / 4;
+            for (int x = c0; x < c1; x++) {
+                double ms = 0; int mn = 0;                    // column tone, smoothed over a few columns
+                int sr = x - c0 < 12 || c1 - x < 12 ? 0 : 4;   // not where the edge darkening is steep
+                for (int k = x - sr; k <= x + sr; k++) if (k >= c0 && k < c1) { ms += m[k][c]; mn++; }
+                ms /= mn;
+                double tgt = side ? ref : ref * (1 - SS_LDIM * (1 - (double)(x - c0) / (c1 - c0)));
+                double g = tgt / (ms > 1 ? ms : 1);
+                g = g < 1 ? 1 : g > 2.5 ? 2.5 : g;
+                for (int r = 0; r < SS_ROWS; r++) {
+                    // only on the sheet: not on the wood bar, the header cells or below the bottom border; feathered
+                    float k = r < 66 ? 0.0f : r < 72 ? (r - 66) / 6.0f : r < 94 ? 1.0f : r < 98 ? (98 - r) / 4.0f : r <= 136 ? 0.0f :
+                              r <= 140 ? (r - 136) / 4.0f : r < 740 ? 1.0f : r < 750 ? (750 - r) / 10.0f : 0.0f;
+                    if (!side && x >= 68 && r >= 94 && r <= 140) k = 1.0f;   // left: the header cell ends at column 66
+                    float v = (float)(T[(r * 512 + x) * 3 + c] * (1 + (g - 1) * k));
+                    if (v > 255) v = 255;
+                    if (side) G->rpatch[r][x - c0][c] = v; else G->patch[r][x - c0][c] = v;
+                }
+            }
+        }
+    }
+    for (int r = 0; r < SS_ROWS; r++) {
+        int cc = r < SS_SPLIT ? SS_BR : SS_CR;
+        for (int c = 0; c < 3; c++) {
+            nearT[r][c] = (R[(r * 512 + cc - 4) * 3 + c] + R[(r * 512 + cc - 3) * 3 + c] + R[(r * 512 + cc - 2) * 3 + c] + R[(r * 512 + cc - 1) * 3 + c]) / 4;
+            pref[r][c] = (G->patch[r][0][c] + G->patch[r][1][c] + G->patch[r][2][c] + G->patch[r][3][c]) / 4;
+            rref[r][c] = r < SS_SPLIT ? nearT[r][c] :
+                         (G->rpatch[r][SS_PW - 4][c] + G->rpatch[r][SS_PW - 3][c] + G->rpatch[r][SS_PW - 2][c] + G->rpatch[r][SS_PW - 1][c]) / 4;
+        }
+    }
+    SsGains(&nearT[0][0], &own[0][0], &G->gN[0][0]);
+    SsGains(&pref[0][0], &own[0][0], &G->gP[0][0]);
+    SsGains(&rref[0][0], &own[0][0], &G->gR[0][0]);
+    return 1;
+}
+
+
+// match a filler to its neighbour at one seam: per row, the ratio of the neighbour's tone (ref) to the filler's first
+// columns, smoothed over a few rows (keeps thin lines like the bottom border), faded out over `n` columns.
+// x0: the filler column at the seam, dir: +1 when the filler continues to the right, -1 to the left; xs: per-row x0
+// offset (rows above SS_SPLIT may start elsewhere), NULL for none
+static void SsSeam(float* img, int w, int x0, int dir, int n, const float (*ref)[3], const int* xs)
+{
+    static float ratio[3][SS_ROWS], tmp[SS_ROWS];
+    for (int r = 0; r < SS_ROWS; r++) {
+        int a = x0 + (xs ? xs[r] : 0);
+        for (int c = 0; c < 3; c++) {
+            float cur = 0;
+            for (int k = 0; k < 3; k++) cur += img[((size_t)r * w + a + k * dir) * 3 + c] / 3;
+            float q = ref[r][c] / (cur > 1 ? cur : 1);
+            if (r >= 97 && r <= 140) q = 1;                     // header row: cells on one side, a line on the other
+            ratio[c][r] = q < 0.7f ? 0.7f : q > 1.4f ? 1.4f : q;
+        }
+    }
+    for (int c = 0; c < 3; c++) { SsBlurLine(ratio[c], SS_ROWS, 1, 1, tmp); }
+    for (int r = 0; r < SS_ROWS; r++) {
+        int a = x0 + (xs ? xs[r] : 0);
+        for (int j = 0; j < n; j++) {
+            float f = 1.0f - (float)j / n; f = f * f * (3 - 2 * f);
+            int x = a + j * dir;
+            if (x < 0 || x >= w) break;
+            for (int c = 0; c < 3; c++) {
+                float* p = &img[((size_t)r * w + x) * 3 + c];
+                float v = *p * (1 + (ratio[c][r] - 1) * f);
+                *p = v > 255 ? 255 : v;
+            }
+        }
+    }
+}
+#define SS_BW (SS_CR - SS_BR)        // the top rows of R columns BR..CR-1 (bracket end, torn edge) go into the fillers
+#define SS_RFW(wt) (SS_PW + (wt) + SS_BW)
+#define SS_LFW(wl) ((wl) + SS_LPW - 2)
+// right filler: [R edge copy (PW) | filler (wt) | top rows: R columns BR..CR-1 (BW)]
+// left filler:  [top rows: R columns CR-1..BR mirrored (up to BW), then filler (wl in all) | L edge copy (PW-2)]
+// RGB, SS_ROWS rows each. The R block is toned to the filler below it, so the group's top no longer meets the
+// lighter filler in a horizontal seam.
+static void SsBuild(const SsGen* G, int wt, int wl, float* rf, float* lf)
+{
+    const int lw = SS_LFW(wl), rw = SS_RFW(wt), bw = wl < SS_BW ? wl : SS_BW;
+    const float* R = G->R;
+    float t3[3];
+    #define PX(img, w, r, x) (&(img)[((size_t)(r) * (w) + (x)) * 3])
+    for (int r = 0; r < SS_ROWS; r++) {
+        for (int x = 0; x < SS_PW; x++) memcpy(PX(rf, rw, r, x), G->rpatch[r][x], 12);
+        for (int x = 0; x < wt; x++) {
+            float t = (x + 0.5f) / wt;
+            SsTileAt(G, r, x, t3);
+            for (int c = 0; c < 3; c++) {
+                float v = t3[c] * (G->gR[r][c] * (1 - t) + G->gN[r][c] * t);
+                PX(rf, rw, r, SS_PW + x)[c] = v < 0 ? 0 : v > 255 ? 255 : v;
+            }
+        }
+        for (int x = 0; x < SS_BW; x++)
+            memcpy(PX(rf, rw, r, SS_PW + wt + x), r < SS_SPLIT ? &R[(r * 512 + SS_BR + x) * 3] : PX(rf, rw, r, SS_PW + wt - 1), 12);
+        for (int x = 0; x < wl; x++) {
+            float t = (x + 0.5f) / wl;
+            SsTileAt(G, r, x + SS_WW / 2, t3);
+            for (int c = 0; c < 3; c++) {
+                float v = t3[c] * (G->gN[r][c] * (1 - t) + G->gP[r][c] * t);
+                PX(lf, lw, r, x)[c] = v < 0 ? 0 : v > 255 ? 255 : v;
+            }
+        }
+        if (r < SS_SPLIT) for (int x = 0; x < bw; x++) memcpy(PX(lf, lw, r, x), &R[(r * 512 + SS_CR - 1 - x) * 3], 12);
+        for (int x = 0; x < SS_LPW - 2; x++) memcpy(PX(lf, lw, r, wl + x), G->patch[r][x], 12);
+    }
+    // the top rows (above SS_SPLIT) sit over different columns than the rows below them (the R block, and on the
+    // right the filler starts at BR on top but at CR-PW below): tone the sheet rows above the split to what lies
+    // right below, per column (smoothed), fading in from the torn edge
+    for (int side = 0; side < 2; side++) {
+        float* img = side ? lf : rf; int w = side ? lw : rw, xa = side ? 0 : SS_PW, xb = side ? wl : rw;
+        int n = xb - xa;
+        if (n <= 0) continue;
+        float* gg = (float*)malloc(sizeof(float) * 3 * n * 2);
+        if (!gg) continue;
+        float* tmp = gg + 3 * n;
+        for (int x = 0; x < n; x++) {
+            int s = SS_BR + x;                                // right: texel column of the sheet on screen
+            for (int c = 0; c < 3; c++) {
+                double up = 0, dn = 0;
+                for (int r = SS_SPLIT - 8; r < SS_SPLIT; r++) up += PX(img, w, r, xa + x)[c];
+                for (int r = SS_SPLIT; r < SS_SPLIT + 8; r++)
+                    dn += side ? PX(img, w, r, x)[c] : s < SS_CR - SS_PW ? R[(r * 512 + s) * 3 + c] : PX(rf, rw, r, s - (SS_CR - SS_PW))[c];
+                float g = (float)(dn / (up > 1 ? up : 1));
+                gg[x * 3 + c] = g < 0.7f ? 0.7f : g > 1.4f ? 1.4f : g;
+            }
+        }
+        for (int c = 0; c < 3; c++) SsBlurLine(gg + c, n, 3, 8, tmp);
+        for (int r = 60; r < SS_SPLIT; r++) {
+            float k = (r - 60) / (float)(SS_SPLIT - 1 - 60);
+            for (int x = 0; x < n; x++) for (int c = 0; c < 3; c++) {
+                float* p = PX(img, w, r, xa + x); float v = p[c] * (1 + (gg[x * 3 + c] - 1) * k); p[c] = v > 255 ? 255 : v;
+            }
+        }
+        free(gg);
+    }
+    // the bottom gold line: drawn slightly differently along the sheet, so in the fillers it runs from the
+    // neighbour's line on one end to the other's
+    for (int r = 706; r <= 713; r++) {
+        float a3[3], b3[3];
+        for (int c = 0; c < 3; c++) {
+            a3[c] = (G->rpatch[r][SS_PW - 1][c] + G->rpatch[r][SS_PW - 2][c]) / 2; b3[c] = (R[(r * 512 + SS_CR) * 3 + c] + R[(r * 512 + SS_CR + 1) * 3 + c]) / 2;
+        }
+        for (int x = 0; x < wt; x++) { float t = (x + 0.5f) / wt; for (int c = 0; c < 3; c++) PX(rf, rw, r, SS_PW + x)[c] = a3[c] * (1 - t) + b3[c] * t; }
+        for (int c = 0; c < 3; c++) a3[c] = (G->patch[r][0][c] + G->patch[r][1][c]) / 2;
+        for (int x = 0; x < wl; x++) { float t = (x + 0.5f) / wl; for (int c = 0; c < 3; c++) PX(lf, lw, r, x)[c] = b3[c] * (1 - t) + a3[c] * t; }
+    }
+    // seams: each filler end against what lies next to it
+    static float ref[SS_ROWS][3]; static int xs[SS_ROWS];
+    int nr = wt / 3 < 24 ? wt / 3 : 24, nl = (wl - bw) / 3 < 24 ? (wl - bw) / 3 : 24, nl2 = wl / 3 < 24 ? wl / 3 : 24;
+    #define RAVG(r, c0, ch) ((R[((r) * 512 + (c0)) * 3 + (ch)] + R[((r) * 512 + (c0) + 1) * 3 + (ch)]) / 2)
+    for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++)       // right filler, left end: the R main / its edge copy
+        ref[r][c] = r < SS_SPLIT ? RAVG(r, SS_BR - 2, c) : (G->rpatch[r][SS_PW - 1][c] + G->rpatch[r][SS_PW - 2][c]) / 2;
+    SsSeam(rf, rw, SS_PW, +1, nr, ref, NULL);
+    for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++)       // right filler, right end: the block / the group
+        ref[r][c] = r < SS_SPLIT ? (PX(rf, rw, r, SS_PW + wt)[c] + PX(rf, rw, r, SS_PW + wt + 1)[c]) / 2 : RAVG(r, SS_CR, c);
+    SsSeam(rf, rw, SS_PW + wt - 1, -1, nr, ref, NULL);
+    for (int r = 0; r < SS_ROWS; r++) for (int c = 0; c < 3; c++)       // left filler, right end: the left edge copy
+        ref[r][c] = (G->patch[r][0][c] + G->patch[r][1][c]) / 2;
+    SsSeam(lf, lw, wl - 1, -1, nl2, ref, NULL);
+    if (wl - bw >= 4) {                                                 // left filler, left end: the block / the group
+        for (int r = 0; r < SS_ROWS; r++) {
+            xs[r] = r < SS_SPLIT ? bw : 0;
+            for (int c = 0; c < 3; c++) ref[r][c] = r < SS_SPLIT ? (PX(lf, lw, r, bw - 1)[c] + PX(lf, lw, r, bw - 2 < 0 ? 0 : bw - 2)[c]) / 2 : RAVG(r, SS_CR, c);
+        }
+        SsSeam(lf, lw, 0, +1, nl < nl2 ? nl2 : nl2, ref, xs);
+    }
+    #undef RAVG
+    #undef PX
+}
+
+// RGB rows [row0, row0 + h) of a cw-wide image -> paletted BLP1 with mipmaps, width rounded up to a power of two
+static uint8_t* SsMakeBlp(const float* rgb, int cw, int row0, int h, const uint8_t* pal, const uint8_t* hdr, DWORD* outN, int* outW)
+{
+    int W = 1; while (W < cw) W <<= 1;
+    static uint8_t lut[1 << 18]; static uint8_t have[1 << 18]; static const uint8_t* lutPal;
+    if (lutPal != pal) { memset(have, 0, sizeof have); lutPal = pal; }
+    int levels = 0; DWORD total = 156 + 1024;
+    for (int w = W, hh = h; ; w = w > 1 ? w / 2 : 1, hh = hh > 1 ? hh / 2 : 1) { total += (DWORD)w * hh; levels++; if ((w == 1 && hh == 1) || levels == 16) break; }
+    uint8_t* o = (uint8_t*)calloc(1, total);
+    float* cur = (float*)malloc(sizeof(float) * 3 * W * h);
+    if (!o || !cur) { free(o); free(cur); return NULL; }
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < W; x++)
+            memcpy(cur + ((size_t)y * W + x) * 3, rgb + ((size_t)(row0 + y) * cw + (x < cw ? x : cw - 1)) * 3, 12);
+    memcpy(o, hdr, 28);
+    *(DWORD*)(o + 12) = W; *(DWORD*)(o + 16) = h;
+    memcpy(o + 156, pal, 1024);
+    DWORD pos = 156 + 1024; int w = W, hh = h;
+    for (int lv = 0; lv < levels; lv++) {
+        *(DWORD*)(o + 28 + lv * 4) = pos; *(DWORD*)(o + 92 + lv * 4) = (DWORD)w * hh;
+        for (int i = 0; i < w * hh; i++) {
+            int R8 = (int)(cur[i * 3] + 0.5f), G8 = (int)(cur[i * 3 + 1] + 0.5f), B8 = (int)(cur[i * 3 + 2] + 0.5f);
+            int key = ((R8 >> 2) << 12) | ((G8 >> 2) << 6) | (B8 >> 2);
+            if (!have[key]) {
+                int best = 0, bd = 1 << 30, rr = (R8 & ~3) + 2, gg = (G8 & ~3) + 2, bb = (B8 & ~3) + 2;
+                for (int k = 0; k < 256; k++) {
+                    int dr = pal[k * 4 + 2] - rr, dg = pal[k * 4 + 1] - gg, db = pal[k * 4] - bb, dd = dr * dr + dg * dg + db * db;
+                    if (dd < bd) { bd = dd; best = k; }
+                }
+                lut[key] = (uint8_t)best; have[key] = 1;
+            }
+            o[pos + i] = lut[key];
+        }
+        pos += (DWORD)w * hh;
+        if (lv + 1 < levels) {                      // 2 x 2 average for the next level
+            int nw = w > 1 ? w / 2 : 1, nh = hh > 1 ? hh / 2 : 1;
+            for (int y = 0; y < nh; y++)
+                for (int x = 0; x < nw; x++)
+                    for (int c = 0; c < 3; c++) {
+                        int x0 = x * 2, y0 = y * 2, x1 = w > 1 ? x0 + 1 : x0, y1 = hh > 1 ? y0 + 1 : y0;
+                        cur[((size_t)y * nw + x) * 3 + c] = (cur[((size_t)y0 * w + x0) * 3 + c] + cur[((size_t)y0 * w + x1) * 3 + c] +
+                                                             cur[((size_t)y1 * w + x0) * 3 + c] + cur[((size_t)y1 * w + x1) * 3 + c]) / 4;
+                    }
+            w = nw; hh = nh;
+        }
+    }
+    *(DWORD*)(o + 24) = 1;                          // has mipmaps
+    free(cur);
+    *outN = total; *outW = W;
+    return o;
+}
+
+// geoset helpers: locate VRTX / UVBS / material id of a geoset
+static int SsGeosetParts(uint8_t* g, DWORD sz, float** v, float** uv, DWORD** mat, DWORD* cnt)
+{
+    *v = NULL; *uv = NULL; *mat = NULL; *cnt = 0;
+    for (DWORD q = 4; q + 8 <= sz; ) {
+        uint8_t* t = g + q; DWORD k = *(DWORD*)(t + 4);
+        if (!memcmp(t, "VRTX", 4)) { *v = (float*)(t + 8); *cnt = k; q += 8 + k * 12; }
+        else if (!memcmp(t, "NRMS", 4)) q += 8 + k * 12;
+        else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + k * 4;
+        else if (!memcmp(t, "PVTX", 4)) q += 8 + k * 2;
+        else if (!memcmp(t, "GNDX", 4)) q += 8 + k;
+        else if (!memcmp(t, "MATS", 4)) { *mat = (DWORD*)(t + 8 + k * 4); q += 8 + k * 4 + 12 + 28; if (q + 4 > sz) return 0; DWORD na = *(DWORD*)(g + q); q += 4 + na * 28; }
+        else if (!memcmp(t, "UVAS", 4)) q += 8;
+        else if (!memcmp(t, "UVBS", 4)) { *uv = (float*)(t + 8); q += 8 + k * 8; }
+        else return 0;
+    }
+    return *v && *uv && *mat && *cnt == 4;
+}
+static void SsSetQuad(uint8_t* g, DWORD sz, float x0, float x1, float y0, float y1, float u0, float u1, float v0, float v1, DWORD mat)
+{
+    float *v, *uv; DWORD *m, cnt;
+    if (!SsGeosetParts(g, sz, &v, &uv, &m, &cnt)) return;
+    float xm = 0, ym = 0;
+    for (DWORD i = 0; i < 4; i++) { xm += v[i * 3] / 4; ym += v[i * 3 + 1] / 4; }
+    for (DWORD i = 0; i < 4; i++) {
+        int right = v[i * 3] > xm, top = v[i * 3 + 1] > ym;
+        v[i * 3] = right ? x1 : x0; v[i * 3 + 1] = top ? y1 : y0;
+        uv[i * 2] = right ? u1 : u0; uv[i * 2 + 1] = top ? v0 : v1;
+    }
+    *m = mat;
+}
+
+static const char* const kSsTex[4] = { "RF1", "RF2", "LF1", "LF2" };
+#define SS_TEXDIR "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\W3TW-ScoreSide-"
+
+// the model with the extended sheet; texW: widths of the RF / LF textures, wt / wl as in SsBuild
+static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl, int rfW, int lfW, DWORD* outN)
+{
+    if (n < 16 || memcmp(d, "MDLX", 4)) return NULL;
+    const float K = 0.4f / 512;
+    // quads: tex/material, x0, x1, top-tile?, u0, u1 (texels), v0, v1 (texel rows), texture width
+    struct Q { int mat; float x0, x1; int top; float u0, u1, v0, v1, tw; } q[16];
+    int nq = 0;
+    #define SQ(m_, a_, b_, t_, c_, d_, e_, f_, w_) q[nq++] = (struct Q){ m_, a_, b_, t_, c_, d_, e_, f_, w_ }
+    float lu1 = (float)SS_LFW(wl);
+    // originals (geosets 0..3, in place)
+    SQ(0, SS_LPW * K, 0.4f, 1, SS_LPW, 512, 0, 512, 512);
+    SQ(1, 0.4f, 0.4f + (SS_CR - SS_PW) * K, 1, 0, SS_CR - SS_PW, SS_SPLIT, 512, 512);
+    SQ(2, SS_LPW * K, 0.4f, 0, SS_LPW, 512, 0, 256, 512);
+    SQ(3, 0.4f, 0.4f + (SS_CR - SS_PW) * K, 0, 0, SS_CR - SS_PW, 0, 256, 512);
+    // added
+    const float gw = (512 - SS_CR) * K;
+    SQ(1, 0.4f, 0.4f + SS_BR * K, 1, 0, SS_BR, 0, SS_SPLIT, 512);
+    SQ(1, 0.8f + e - gw, 0.8f + e, 1, SS_CR, 512, 0, 512, 512);
+    SQ(1, -e, -e + gw, 1, 512, SS_CR, 0, 512, 512);
+    SQ(5, 0.4f + (SS_CR - SS_PW) * K, 0.8f + e - gw, 1, 0, SS_PW + wt, SS_SPLIT, 512, rfW);
+    SQ(5, 0.4f + SS_BR * K, 0.8f + e - gw, 1, SS_PW, SS_RFW(wt), 0, SS_SPLIT, rfW);
+    SQ(7, -e + gw, SS_LPW * K, 1, 0, lu1, 0, 512, lfW);
+    SQ(3, 0.8f + e - gw, 0.8f + e, 0, SS_CR, 512, 0, 256, 512);
+    SQ(3, -e, -e + gw, 0, 512, SS_CR, 0, 256, 512);
+    SQ(6, 0.4f + (SS_CR - SS_PW) * K, 0.8f + e - gw, 0, 0, SS_PW + wt, 0, 256, rfW);
+    SQ(8, -e + gw, SS_LPW * K, 0, 0, lu1, 0, 256, lfW);
+    #undef SQ
+    const int added = nq - 4;
+    // find chunks
+    DWORD p = 4, gp = 0, gsz = 0, mp = 0, msz = 0, tp = 0, tsz = 0;
+    while (p + 8 <= n) {
+        DWORD sz = *(DWORD*)(d + p + 4);
+        if (p + 8 + sz > n) return NULL;
+        if (!memcmp(d + p, "GEOS", 4)) { gp = p; gsz = sz; }
+        if (!memcmp(d + p, "MTLS", 4)) { mp = p; msz = sz; }
+        if (!memcmp(d + p, "TEXS", 4)) { tp = p; tsz = sz; }
+        p += 8 + sz;
+    }
+    if (!gp || !mp || !tp || tsz != 5 * 268 || msz < 48 || *(DWORD*)(d + mp + 8) != 48) return NULL;
+    // first geoset: the template for the added quads
+    DWORD g0sz = *(DWORD*)(d + gp + 8);
+    if (g0sz < 12 || g0sz > gsz) return NULL;
+    { float *v, *uv; DWORD *m, cnt; uint8_t* t = (uint8_t*)malloc(g0sz); memcpy(t, d + gp + 8, g0sz);
+      int ok = SsGeosetParts(t, g0sz, &v, &uv, &m, &cnt); free(t); if (!ok) return NULL; }
+    DWORD on = n + 4 * 48 + 4 * 268 + added * g0sz;
+    uint8_t* o = (uint8_t*)malloc(on);
+    if (!o) return NULL;
+    DWORD w = 0; p = 4; memcpy(o, d, 4); w = 4;
+    while (p + 8 <= n) {
+        DWORD sz = *(DWORD*)(d + p + 4);
+        memcpy(o + w, d + p, 8 + sz);
+        if (p == mp) {
+            for (int i = 0; i < 4; i++) {
+                uint8_t* m = o + w + 8 + sz + i * 48;
+                memcpy(m, d + mp + 8, 48);
+                *(DWORD*)(m + 32) = 5 + i;          // layer texture id
+            }
+            *(DWORD*)(o + w + 4) = sz + 4 * 48; w += 8 + sz + 4 * 48;
+        } else if (p == tp) {
+            for (int i = 0; i < 4; i++) {
+                uint8_t* t = o + w + 8 + sz + i * 268;
+                memset(t, 0, 268);
+                snprintf((char*)t + 4, 260, SS_TEXDIR "%s.blp", kSsTex[i]);
+            }
+            *(DWORD*)(o + w + 4) = sz + 4 * 268; w += 8 + sz + 4 * 268;
+        } else if (p == gp) {
+            uint8_t* base = o + w + 8;
+            // originals 0..3 edited in place
+            DWORD g = 0;
+            for (int i = 0; i < 4 && g + 4 <= sz; i++) {
+                DWORD s = *(DWORD*)(base + g);
+                struct Q* Q = &q[i];
+                float y0 = Q->top ? 0.6f - Q->v1 * K : 0.2f - Q->v1 * K, y1 = Q->top ? 0.6f - Q->v0 * K : 0.2f - Q->v0 * K;
+                float th = Q->top ? 512.0f : 256.0f;
+                SsSetQuad(base + g, s, Q->x0, Q->x1, y0, y1, Q->u0 / Q->tw, Q->u1 / Q->tw, Q->v0 / th, Q->v1 / th, Q->mat);
+                g += s;
+            }
+            // geoset 4: the highlighted header strip of the sorted column, a copy of the whole header row; its ends
+            // would show the original sheet's edges over the extension
+            if (g + 4 <= sz) {
+                DWORD s = *(DWORD*)(base + g);
+                float *v = NULL, *uv = NULL; DWORD *m, cnt = 0;
+                for (DWORD qq = 4; qq + 8 <= s; ) {
+                    uint8_t* t = base + g + qq; DWORD k = *(DWORD*)(t + 4);
+                    if (!memcmp(t, "VRTX", 4)) { v = (float*)(t + 8); cnt = k; qq += 8 + k * 12; }
+                    else if (!memcmp(t, "NRMS", 4)) qq += 8 + k * 12;
+                    else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) qq += 8 + k * 4;
+                    else if (!memcmp(t, "PVTX", 4)) qq += 8 + k * 2;
+                    else if (!memcmp(t, "GNDX", 4)) qq += 8 + k;
+                    else if (!memcmp(t, "MATS", 4)) { m = (DWORD*)(t + 8 + k * 4); (void)m; qq += 8 + k * 4 + 12 + 28; if (g + qq + 4 > sz) break; qq += 4 + *(DWORD*)(base + g + qq) * 28; }
+                    else if (!memcmp(t, "UVAS", 4)) qq += 8;
+                    else if (!memcmp(t, "UVBS", 4)) { uv = (float*)(t + 8); if (v && k == cnt) for (DWORD i = 0; i < cnt; i++) {
+                            float* x = &v[i * 3]; float* u = &uv[i * 2];
+                            if (*x > 0.799f) { *u = *u * SS_CR / 512.0f; *x = 0.4f + SS_CR * K; }
+                            else if (*x < 0.001f) { *u = 2.0f / 512; *x = 2 * K; } }
+                        qq += 8 + k * 8; }
+                    else break;
+                }
+            }
+            for (int i = 4; i < nq; i++) {
+                uint8_t* t = base + sz + (i - 4) * g0sz;
+                memcpy(t, d + gp + 8, g0sz);
+                struct Q* Q = &q[i];
+                float y0 = Q->top ? 0.6f - Q->v1 * K : 0.2f - Q->v1 * K, y1 = Q->top ? 0.6f - Q->v0 * K : 0.2f - Q->v0 * K;
+                float th = Q->top ? 512.0f : 256.0f;
+                SsSetQuad(t, g0sz, Q->x0, Q->x1, y0, y1, Q->u0 / Q->tw, Q->u1 / Q->tw, Q->v0 / th, Q->v1 / th, Q->mat);
+            }
+            *(DWORD*)(o + w + 4) = sz + added * g0sz; w += 8 + sz + added * g0sz;
+        } else w += 8 + sz;
+        p += 8 + sz;
+    }
+    *outN = w;
+    return o;
+}
+
+static uint8_t* SsReadFile(HANDLE mpq, const char* name, DWORD scope, DWORD* outN)
+{
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return NULL;
+    DWORD n = S_Size(h, NULL), got = 0;
+    uint8_t* b = (n > 0 && n < (4u << 20)) ? (uint8_t*)malloc(n) : NULL;
+    if (b && !(S_Read(h, b, n, &got, NULL) && got == n)) { free(b); b = NULL; }
+    S_Close(h);
+    *outN = n;
+    return b;
+}
+static void SsCacheDir(char* dir)
+{
+    GetModuleFileNameA(NULL, dir, MAX_PATH);
+    char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
+    strcat(dir, "W3TrueWidescreen_cache"); CreateDirectoryA(dir, NULL);
+}
+static int SsWrite(const char* path, const uint8_t* b, DWORD n)
+{
+    FILE* f = fopen(path, "wb"); int ok = f && fwrite(b, 1, n, f) == n; if (f) fclose(f);
+    return ok;
+}
+// the extended sheet: model plus its four filler textures written to the cache folder; 0 if it can't be made
+static uint8_t* ExtendScoreBackground(HANDLE mpq, DWORD scope, const uint8_t* model, DWORD n, float e, DWORD* outN)
+{
+    int wt = (int)lroundf(e * 1280.0f), wl = wt - (512 - SS_CR) + 2, lw = SS_LFW(wl), rw = SS_RFW(wt);
+    if (wl < 8) return NULL;                                  // too narrow (about 3:2 and below)
+    static const char* const tiles[4] = { "L1", "R1", "L2", "R2" };
+    SsSrc S = { 0 }; SsGen* G = NULL; float *rf = NULL, *lf = NULL; uint8_t* o = NULL;
+    S.L = (float*)malloc(sizeof(float) * SS_ROWS * 512 * 3); S.R = (float*)malloc(sizeof(float) * SS_ROWS * 512 * 3);
+    G = (SsGen*)calloc(1, sizeof(SsGen));
+    int ok = S.L && S.R && G;
+    for (int i = 0; i < 4 && ok; i++) {
+        char nm[MAX_PATH]; DWORD bn = 0;
+        snprintf(nm, sizeof nm, "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\scorescreen-background-%s.blp", tiles[i]);
+        uint8_t* b = SsReadFile(mpq, nm, scope, &bn);
+        int top = i < 2, right = i & 1;
+        ok = b && SsReadBlp(b, bn, right ? S.R : S.L, top ? 0 : 512, top ? 512 : 256, right ? NULL : S.pal[top ? 0 : 1], right ? NULL : S.hdr[top ? 0 : 1]);
+        free(b);
+    }
+    if (ok) ok = SsPrepare(G, &S);
+    if (ok) {
+        rf = (float*)malloc(sizeof(float) * SS_ROWS * rw * 3); lf = (float*)malloc(sizeof(float) * SS_ROWS * lw * 3);
+        ok = rf && lf;
+    }
+    int rfW = 0, lfW = 0;
+    if (ok) {
+        SsBuild(G, wt, wl, rf, lf);
+        char dir[MAX_PATH], path[MAX_PATH]; SsCacheDir(dir);
+        for (int i = 0; i < 4 && ok; i++) {
+            DWORD bn = 0; int W = 0, top = !(i & 1);
+            uint8_t* b = SsMakeBlp(i < 2 ? rf : lf, i < 2 ? rw : lw, top ? 0 : 512, top ? 512 : 256, S.pal[top ? 0 : 1], S.hdr[top ? 0 : 1], &bn, &W);
+            snprintf(path, sizeof path, "%s\\ScoreSide-%s.blp", dir, kSsTex[i]);
+            ok = b && SsWrite(path, b, bn);
+            free(b);
+            if (i < 2) rfW = W; else lfW = W;
+        }
+    }
+    if (ok) o = SsBuildModel(model, n, e, wt, wl, rfW, lfW, outN);
+    free(S.L); free(S.R); if (G) { free(G->tileN); free(G->tileW); } free(G); free(rf); free(lf);
+    return o;
+}
+static int ServeScoreSide(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
+{
+    const char* bn = strrchr(name, '\\'); bn = bn ? bn + 1 : name;
+    if (_strnicmp(bn, "W3TW-ScoreSide-", 15)) return 0;
+    char dir[MAX_PATH], path[MAX_PATH]; SsCacheDir(dir);
+    snprintf(path, sizeof path, "%s\\ScoreSide-%s", dir, bn + 15);
+    BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
+    if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
+    return r;
+}
 static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
     HANDLE h = 0;
@@ -990,26 +1614,29 @@ static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDL
     uint8_t* buf = (n > 0 && n < (1u << 20)) ? (uint8_t*)malloc(n) : NULL;
     int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
     S_Close(h);
-    uint8_t* o = ok ? AddSideGeosets(buf, n, (float)((0.6 * g_aspect - 0.8) * 0.5), 0.10f, &on) : NULL;
+    float e = (float)((0.6 * g_aspect - 0.8) * 0.5);
+    int ext = 0;
+    uint8_t* o = NULL;
+    if (ok) { o = ExtendScoreBackground(mpq, scope, buf, n, e, &on); ext = o != NULL; }
+    if (ok && !o) o = AddSideGeosets(buf, n, e, 0.10f, &on);
     free(buf);
     if (!o) { logf_("score screen background not adapted"); return 0; }
     static char path[MAX_PATH];
-    char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
-    char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
-    strcat(dir, "W3TrueWidescreen_cache"); CreateDirectoryA(dir, NULL);
+    char dir[MAX_PATH]; SsCacheDir(dir);
     snprintf(path, sizeof path, "%s\\ScoreScreen-Background.mdx", dir);
-    FILE* f = fopen(path, "wb"); ok = f && fwrite(o, 1, on, f) == on; if (f) fclose(f);
+    ok = SsWrite(path, o, on);
     free(o);
     if (!ok) return 0;
     BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
     if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
-    logf_("score screen background: sides covered (%d)", r);
+    logf_("score screen background: %s (%d)", ext ? "sheet extended" : "sides covered", r);
     return r;
 }
 static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
     if (g_loadFull && g_aspect > 1.34 && SameName(name, "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\ScoreScreen-Background.mdx"))
         return ServeScoreBackground(mpq, name, scope, ph);
+    if (g_loadFull && g_aspect > 1.34 && ServeScoreSide(mpq, name, scope, ph)) return 1;
     int dota = g_dotaPending && g_loadModel[0] && SameName(name, g_loadModel);
     int custom = !dota && g_loadModel[0] && SameName(name, g_loadModel);
     static const char kBg[] = "UI\\Glues\\Loading\\Backgrounds\\", kGen[] = "UI\\Glues\\Loading\\Load-Generic\\";
