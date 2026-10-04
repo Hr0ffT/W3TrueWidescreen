@@ -99,6 +99,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.9.1** — Fixed a crash when the sound provider is changed in the game's options (e.g. EAX switched on, with DSOAL).
 - **1.9** — `ScoreScreen`: how the score screen fills a wide screen. 3 (new default): the sheet stretched to the width below its header, with the header cells and tabs in place. 2: the sheet extended to both edges, with its border on both sides (1.8.1). 1: original 4:3 with black bars.
 - **1.8.1** — With `LoadingFullScreen=1` the score screen's sheet is extended to the screen edges instead of the bars being covered. With `UIScale` the score screen's parts stay in their places on its background.
 - **1.8** — `UIScale`: size of the in-game interface in percent. `LoadingFullScreen`: loading screen picture over the whole screen. Movie subtitles (Subtitles on in the game's options) are shown with the movie renderer too, drawn by the renderer itself, so RTX HDR stays on; `MovieSubtitleSize` and `MovieSubtitleBrightness` set their size and brightness. With `LoadingFullScreen=1` the black bars beside the score screen are filled.

@@ -2888,7 +2888,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.9  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.9.1  Game.dll build %u", build);
     if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
 
     char src[128];
@@ -2984,6 +2984,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
     if (reason == DLL_PROCESS_DETACH) RemoveHiresTicks();
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
+        // the Miles sound library loads the .mix files and unloads / reloads them when the sound provider changes
+        // (e.g. EAX switched on); the patches in Game.dll point into this module, so it must stay loaded
+        { HMODULE self; GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)DllMain, &self); }
         Install();
     }
     return TRUE;
