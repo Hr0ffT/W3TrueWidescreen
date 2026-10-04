@@ -1,4 +1,4 @@
-// W3TrueWidescreen.mix - unstretched widescreen for Warcraft III 1.26a (Game.dll build 6401)
+// W3TrueWidescreen.mix - unstretched widescreen for Warcraft III 1.26a (Game.dll build 6401) and 1.27b (build 7085)
 // Copyright (c) 2026 Hr0ffT - MIT License - https://github.com/Hr0ffT
 //
 // The engine lays out its UI in a virtual 0.8 x 0.6 screen and stretches it to the monitor.
@@ -54,20 +54,115 @@ static void logf_(const char* fmt, ...)
     fputc('\n', g_log); fflush(g_log);
 }
 
-// --- game offsets (1.26a) ---
-#define RVA_SetFramePoint   0x606770
-#define RVA_SetAllPoints    0x6067F0
-#define RVA_ClearAllPoints  0x606160
-#define RVA_OrthoFld        0x7AE566   // fld dword ptr [0.8f] -> ortho right edge for UI layers
-#define RVA_GameUIVtbl      0x93631C
+// --- game offsets: one table per supported Game.dll build ---
 #define OFS_UI_Frame        0xB4
 #define OFS_UI_World        0x3BC
 #define OFS_UI_MouseBorders 0x420
 
-static const u32 kDoubleSites[] = {   // imm32 operands referencing double 0.8 that mean "UI width"
-    0x4C648A, 0x4C64B4, 0x4C64EA, 0x4C6514, 0x4C6546, 0x4C6586, // UI <-> normalized conversions
-    0x33CE33, 0x55D9FD, 0x57136A                                 // tooltip right-edge clamps
+typedef struct { u32 rva; int len; const char* bytes; } Code;   // code expected at rva (len bytes)
+typedef struct {
+    u32 build; const char* name;
+    int sse;                         // 1.27: UI constants are floats (SSE code), 1.26: doubles (x87)
+    // frames
+    Code setFramePoint, setAllPoints, setAbsPoint;
+    u32 clearAllPoints, setWidth, setHeight, screenRootSlot1;
+    // the UI width / height operands
+    u32 widthSites[12], widthConst;  // operands (addresses) pointing at the 0.8 constant: "UI width"
+    u32 heightSites[8], heightConst; // the same for 0.6: "UI height" (UIScale)
+    int orthoImm;                    // 1: ortho edges are immediates (mov [esp+n], 0.8f), 0: fld [const] operands
+    u32 orthoW, orthoWConst, orthoH, orthoHConst;
+    u32 pickTop, pickTopConst;       // map-click gate operand (0.577f)
+    // classes (vtables)
+    u32 vtGameUI, vtGameUIFrame, vtSimpleTop, vtCursor, vtSprite, vtLoading, vtScore, vtHeroBar, vtCinePanel,
+        vtTimeOfDay, vtStatBar, vtSimpleFrame, vtFramePointRel;
+    // return addresses
+    u32 retInventory, retMenu[3], retGlueTopRight;
+    // world view, projection, rendering
+    Code persp, renderWorld;
+    u32 simpleTop, gx, gxDevice, gxWidth;   // gxDevice / gxWidth 0: found at runtime
+    // health bars
+    u32 statBarCtor, sbSetTexCall, sbSetTex, sbLayerPush, ctorCalls[8], frameShow;
+    Code topRegister, barRaise; u32 barRaiseAt; uint8_t barRaiseOn, barRaiseOff;
+    // cinematics
+    Code movieSize, moviePos, modeLoop, modeRestore;
+    const char* movieSizeNew; u32 modeLoopTo, gammaStart, gammaEnd, playCall, playFn; int playArgs;
+    u32 movieW, movieH, subY0, subCount, subIdx, subTab;
+    // frame rate limit
+    Code renderEvent; int renderSelfEcx; u32 tickGateRet;
+    // anti-hack process protection (0: none in this build)
+    u32 protectCall, protectFn;
+    int dota;                        // DracoL1ch's DotA helpers exist for this build
+} GameAddrs;
+
+static const GameAddrs kGames[] = {
+  { 6401, "1.26a", 0,
+    { 0x606770, 5, "\x53\x8B\x5C\x24\x08" }, { 0x6067F0, 5, "\x56\x57\x8B\xF1\xE8" }, { 0x6061B0, 5, "\x53\x8B\x5C\x24\x08" },
+    0x606160, 0x605D90, 0x605DB0, 0x60A140,
+    { 0x4C648A, 0x4C64B4, 0x4C64EA, 0x4C6514, 0x4C6546, 0x4C6586,     // UI <-> normalized conversions
+      0x33CE33, 0x55D9FD, 0x57136A }, 0x8768B0,                        // tooltip right-edge clamps
+    { 0x4C649A, 0x4C64C9, 0x4C64FA, 0x4C6529, 0x4C6566, 0x4C65A6 }, 0x93C218,
+    0, 0x7AE568, 0x93A8E8, 0x7AE55A, 0x93D84C,
+    0x39799E, 0x941548,
+    0x93631C, 0x9362F4, 0x96E2D0, 0x970610, 0x96E558, 0x96662C, 0x967460, 0x93F974, 0x93C794,
+    0x93FE38, 0x93E604, 0x96DFB4, 0x97076C,
+    0x37161A, { 0x5B8045, 0x5B8205, 0x5B83AB }, 0x57BB33,
+    { 0x7B66F0, 5, "\x51\xD9\x44\x24\x0C" }, { 0x395900, 10, "\x53\x56\x8B\xF1\x8B\x8E\x38\x03\x00\x00" },
+    0xACE758, 0xACBD40, 0x584, 0x9C,
+    0x359CC0, 0x359E4A, 0x60E610, 0x60E68F,
+    { 0x35DFF5, 0x35E07F, 0x35F784, 0x35F811, 0x36904B, 0x3690D2, 0x369493, 0x379AFF }, 0x609B50,
+    { 0x60C760, 7, "\x56\x8b\xf1\x8b\x4c\x24\x08" }, { 0x379B52, 9, "\x8B\x81\x84\x00\x00\x00\x83\xC0\x01" }, 0x379B5A, 0x01, 0x00,
+    { 0x52B55E, 42, "\x8b\x08\x8d\x54\x24\x0c\x52\x50\x8b\x41\x28\xff\xd0\x8b\x04\x24\x8b\x08\x8d\x54\x24\x08\x52\x50\x8b\x41\x2c\xff\xd0\x8b\x04\x24\x8b\x08\x8b\x51\x08\x50\xff\xd2\xeb\x10" },
+    { 0x52B5D3, 9, "\x8b\x87\x9c\x00\x00\x00\x52\xff\xd0" },
+    { 0x52B9FF, 8, "\xc7\x44\x24\x44\x00\x00\x5c\x00" }, { 0x52BB56, 9, "\x33\xd2\x32\xc9\xe8\xd1\xfd\xff\xff" },
+    "\x8b\x08"                          // mov  ecx, [eax]
+    "\x8d\x54\x24\x08\x52"              // lea  edx, [esp+8]  (height) ; push edx
+    "\x8d\x54\x24\x10\x52"              // lea  edx, [esp+10h] (width) ; push edx
+    "\x50"                              // push eax
+    "\xff\x91\x88\x00\x00\x00"          // call [ecx+88h]  IBasicVideo::GetVideoSize
+    "\x8b\x04\x24\x8b\x08\x8b\x51\x08\x50\xff\xd2"   // pBV->Release()
+    "\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90"
+    "\xeb\x10",                         // jmp to the window placement code (unchanged)
+    0x52BAD7, 0x52C910, 0x52B850, 0x526F42, 0x52C940, 3,
+    0xACC698, 0xACC69C, 0xACC088, 0xACC6BC, 0xACC6C0, 0xACC6D0,
+    { 0x62D7D0, 5, "\x53\x57\x8d\x7e\x10" }, 0, 0x62D73A,
+    0x00986C, 0x00BAB0,
+    1 },
+  { 7085, "1.27b", 1,
+    { 0x111600, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" }, { 0x1114B0, 5, "\x55\x8B\xEC\x56\x57" }, { 0x111590, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" },
+    0x110A00, 0x1116C0, 0x111520, 0x11DFF0,
+    { 0x8B37A8, 0x8B37B9, 0x8B3800, 0x8B3848, 0x8B3858, 0x8B3869, 0x8B38B0, 0x8B38F8,
+      0x3C1A4D, 0x2B5877, 0x302383 }, 0xAA9328,
+    { 0x8B37CB, 0x8B37DD, 0x8B3815, 0x8B3838, 0x8B387B, 0x8B388D, 0x8B38C5, 0x8B38E8 }, 0xAA9324,
+    1, 0x193556, 0x3F4CCCCD, 0x193546, 0x3F19999A,
+    0x38418E, 0xABB988,
+    0xAB9D90, 0xAB9E78, 0xA8D1BC, 0xA8DB04, 0xA8B304, 0xAB13C8, 0xAB2730, 0xABE7FC, 0xABD8C4,
+    0xAC1F48, 0xABCE78, 0xA8D204, 0xA8DDD0,
+    0x39E94F, { 0x2FB129, 0x2F0BE8, 0x2E81EF }, 0x2E0CC8,
+    { 0x126E30, 6, "\x55\x8B\xEC\x83\xE4\xF8" }, { 0x385950, 5, "\x56\x8B\xF1\x33\xD2" },
+    0xD47B68, 0xD52EB8, 0, 0,
+    0x3A16E0, 0x3A18D7, 0x10FE90, 0x10FF07,
+    { 0x3926BF, 0x39C69E, 0x39C724, 0x39E361, 0x39E3E2, 0x39E522, 0x39F051, 0x39F0D7 }, 0x10DE60,
+    { 0x10C1D0, 10, "\x55\x8b\xec\x83\xec\x08\x53\x8b\x5d\x08" }, { 0x39270F, 7, "\x8B\x81\x84\x00\x00\x00\x40" }, 0x392715, 0x40, 0x90,
+    { 0x13D361, 34, "\x8b\x01\x8d\x55\xcc\x52\x51\xff\x50\x28\x8b\x45\xd8\x8d\x55\xd0\x52\x50\x8b\x08\xff\x51\x2c\x8b\x45\xd8\x50\x8b\x08\xff\x51\x08\xeb\x0e" },
+    { 0x13D3D3, 8, "\x8b\x11\xff\x92\x9c\x00\x00\x00" },
+    { 0x13C47D, 7, "\xc7\x45\x88\x00\x00\x5c\x00" }, { 0x13D766, 9, "\x33\xd2\x32\xc9\xe8\x31\xec\xff\xff" },
+    "\x8b\x01"                          // mov  eax, [ecx]
+    "\x8d\x55\xd0\x52"                  // lea  edx, [ebp-30h] (height) ; push edx
+    "\x8d\x55\xcc\x52"                  // lea  edx, [ebp-34h] (width) ; push edx
+    "\x51"                              // push ecx
+    "\xff\x90\x88\x00\x00\x00"          // call [eax+88h]  IBasicVideo::GetVideoSize
+    "\x8b\x45\xd8\x50\x8b\x08\xff\x51\x08"           // pBV->Release()
+    "\x90\x90\x90\x90\x90\x90"
+    "\xeb\x0e",                         // jmp to the window placement code (unchanged)
+    0x13C526, 0x13D72C, 0x13CE93, 0x136A40, 0x13CB50, 5,
+    0, 0, 0xD53760, 0xD52F1C, 0xD52F20, 0xD52F30,
+    { 0x07B780, 5, "\x53\x56\x57\x8b\xf9" }, 1, 0x07B6ED,
+    0, 0,
+    0 },
 };
+static const GameAddrs* G;           // the running build
+#define VT(name) (G->vt##name)
+static int CodeIs(const Code* c) { return c->rva && !memcmp((void*)(g_base + c->rva), c->bytes, c->len); }
 
 typedef void (__fastcall *SetFramePoint_t)(u32 frame, u32 edx, u32 point, u32 parent, u32 rel, float x, float y, u32 flag);
 typedef void (__fastcall *ClearAllPoints_t)(u32 frame, u32 edx);
@@ -90,7 +185,7 @@ static int IsGameUIRoot(u32 parent)
     if (!parent) return 0;
     u32 obj = parent - OFS_UI_Frame;
     if (IsBadReadPtr((void*)obj, OFS_UI_MouseBorders + 4)) return 0;
-    if (*(u32*)obj != g_base + RVA_GameUIVtbl) return 0;
+    if (*(u32*)obj != g_base + VT(GameUI)) return 0;
     g_gameUI = obj;
     return 1;
 }
@@ -98,13 +193,11 @@ static int IsGameUIRoot(u32 parent)
 static int InCinematicMode(void)
 {
     u32 ui = g_gameUI;
-    if (!ui || IsBadReadPtr((void*)ui, 0x184) || *(u32*)ui != g_base + RVA_GameUIVtbl) return 0;
+    if (!ui || IsBadReadPtr((void*)ui, 0x184) || *(u32*)ui != g_base + VT(GameUI)) return 0;
     u32 st = *(u32*)(ui + 0x180);
     return st == 1 || st == 3;
 }
 
-#define RVA_ScreenRootSlot1 0x60A140
-#define RVA_SetAbsPoint     0x6061B0
 static int g_glue = 1;
 
 // any full-screen root frame (game UI root, glue/menu screens, loading screen):
@@ -114,7 +207,7 @@ static int IsScreenRoot(u32 parent)
     if (!parent || IsBadReadPtr((void*)parent, 4)) return 0;
     u32 vt = *(u32*)parent;
     if (!vt || IsBadReadPtr((void*)vt, 8)) return 0;
-    if (*(u32*)(vt + 4) != g_base + RVA_ScreenRootSlot1) return 0;
+    if (*(u32*)(vt + 4) != g_base + G->screenRootSlot1) return 0;
     g_screenRoot = parent;
     return 1;
 }
@@ -128,8 +221,8 @@ static u32 VtRva(u32 p)
 
 // frame classes that host other frames' rendering (simple-frame renderer, cursor/tooltip layer):
 // they must stay full screen, otherwise everything they draw is translated a second time
-static u32 g_keepVt[16] = { 0x96E2D0, 0x970610 };
-static int g_keepVtN = 2;
+static u32 g_keepVt[16];
+static int g_keepVtN = 2;          // [0], [1]: CSimpleTop, CCursorFrame (set at install)
 
 static int IsKeepClass(u32 frame)
 {
@@ -145,9 +238,9 @@ static int IsKeepClassGlue(u32 frame)
 {
     if (IsKeepClass(frame)) return 1;
     u32 vt = VtRva(frame);
-    if (g_menuBgFull && vt == 0x96E558) return 1;               // CSpriteFrame: 3D backgrounds
+    if (g_menuBgFull && vt == VT(Sprite)) return 1;               // CSpriteFrame: 3D backgrounds
     // screens drawn as one fixed 4:3 picture stay centred: CLoading (loading screen), CScoreScreen (mission score)
-    if (g_menuEdges && vt != 0x96662C && vt != 0x967460) return 1;
+    if (g_menuEdges && vt != VT(Loading) && vt != VT(Score)) return 1;
     return 0;
 }
 
@@ -160,7 +253,6 @@ static int   g_worldBottomDefault = 0, g_worldTopDefault = 0;
 //      >= 0.577 (fld dword ptr [0.577f] at 0x39799C, just under the original 0.58 top of the world view). With
 //      WorldFullHeight the world is drawn up to 0.6, so the strip beside the top bar showed the world but took no
 //      clicks. Point that operand at our own value: no upper gate when the world is full height. ----
-#define RVA_PickTopFld 0x39799C          // d9 05 <addr of 0.577f>
 static float g_pickTop = 0.577f;
 
 static int g_heroEdge = 1;     // HeroBarEdge=1: hero portraits (top-left) hug the left screen edge
@@ -168,8 +260,8 @@ static int g_cineFull = 1;     // CinematicFullWidth=1: cinematic letterbox pane
 static int IsFullWidthFrame(u32 frame, u32 ui)
 {
     if (IsKeepClass(frame)) return 1;
-    if (g_heroEdge && VtRva(frame) == 0x93F974) return 1;      // CHeroBar
-    if (g_cineFull && VtRva(frame) == 0x93C794) return 1;      // CCinematicPanel: letterbox spans the whole width
+    if (g_heroEdge && VtRva(frame) == VT(HeroBar)) return 1;      // CHeroBar
+    if (g_cineFull && VtRva(frame) == VT(CinePanel)) return 1;      // CCinematicPanel: letterbox spans the whole width
     u32 world = *(u32*)(ui + OFS_UI_World);
     u32 mb    = *(u32*)(ui + OFS_UI_MouseBorders);
     if (world && (frame == world + OFS_UI_Frame || frame == world)) return 1;
@@ -195,9 +287,9 @@ static void CheckWindowOnce(void)
     if (h && GetClientRect(h, &r) && r.bottom > 0)
     {
         double wa = (double)r.right / r.bottom;
-        if (fabs(0.6 * wa - g_uiW_d) > 0.01)
+        if (fabs(g_uiH_d * wa - g_uiW_d) > 0.01)        // (UIScale: the virtual screen is taller than 0.6)
             logf_("WARNING: window is %ldx%ld (aspect %.4f) but the mod uses aspect %.4f - set Width/Height in W3TrueWidescreen.ini",
-                  r.right, r.bottom, wa, g_uiW_d / 0.6);
+                  r.right, r.bottom, wa, g_uiW_d / g_uiH_d);
         else dlogf_("window client %ldx%ld ok", r.right, r.bottom);
     }
 }
@@ -211,7 +303,7 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
 {
     (void)edx;
     DotAFrameEvent(frame, parent);
-    if (g_enabled && g_cineFull && x == 0.0f && y == 0.0f && point == rel && (point == 0 || point == 8) && VtRva(parent) == 0x93C794) {
+    if (g_enabled && g_cineFull && x == 0.0f && y == 0.0f && point == rel && (point == 0 || point == 8) && VtRva(parent) == VT(CinePanel)) {
         // CinematicTopBorder (TOPLEFT) / CinematicBottomBorder (BOTTOMRIGHT) are 0.8 wide and anchored at one
         // corner of the full-width cinematic panel: pin the opposite side too, so they span the whole width
         u32 other = point == 0 ? 2 : 6;
@@ -220,13 +312,13 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         dlogf_("cinematic border %08X pinned to both sides (points %u,%u)", frame, point, other);
         return;
     }
-    if (g_enabled && g_scaleOn && VtRva(parent) == 0x96662C) {        // frames placed on the loading screen
+    if (g_enabled && g_scaleOn && VtRva(parent) == VT(Loading)) {        // frames placed on the loading screen
         float k = g_uiH_f / 0.6f;
         if (point == 7 && rel == 7) y += 0.0025f * (k - 1.0f);           // LoadingBarText: on the bar, as the bar moves
         else { x *= k; y *= k; }
-        if (point == 6 && rel == 6 && VtRva(frame) == 0x96E558) x += 0.4f * (k - 1.0f);   // LoadingBar (model)
+        if (point == 6 && rel == 6 && VtRva(frame) == VT(Sprite)) x += 0.4f * (k - 1.0f);   // LoadingBar (model)
     }
-    if (g_enabled && g_f != 0.0f && point == 6 && rel == 6 && VtRva(frame) == 0x93FE38) {
+    if (g_enabled && g_f != 0.0f && point == 6 && rel == 6 && VtRva(frame) == VT(TimeOfDay)) {
         y += g_f;
         dlogf_("time of day indicator raised by %.4f", g_f);
     }
@@ -304,9 +396,9 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
     u32 ret = (u32)__builtin_return_address(0) - g_base;
     // fixed positions laid out for the 0..0.8 space (info bar inventory, menu dialogs) -> move into the centered area.
     // positions computed at runtime (tooltips, HP bars, floating text) are already in the wide space and stay as is.
-    int fixed = (ret == 0x37161A) || (!g_menuEdges && (ret == 0x5B8045 || ret == 0x5B8205 || ret == 0x5B83AB));
+    int fixed = (ret == G->retInventory) || (!g_menuEdges && (ret == G->retMenu[0] || ret == G->retMenu[1] || ret == G->retMenu[2]));
     float nx = (g_enabled && fixed) ? x + g_e : x;
-    if (g_enabled && !fixed && !FromGame(ret + g_base) && VtRva(frame) != 0x93E604 && !OverlayPlacement()) {
+    if (g_enabled && !fixed && !FromGame(ret + g_base) && VtRva(frame) != VT(StatBar) && !OverlayPlacement()) {
         if (y > 0.5f && x < 0.06f) { }                    // top-left corner group: left screen edge
         else if (y > 0.5f && x > 0.7f) nx = x + 2 * g_e;   // top-right corner group: right screen edge
         else nx = x + g_e;                                // laid out around the 0.8-wide console
@@ -315,14 +407,14 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
     // Unit health bars (CStatBar) follow their units anywhere on screen. With the world drawn behind the console,
     // units down there get bars too, and those are drawn on top of the console. In the original these units are
     // outside the world view and have no bars: move such bars off screen (only where the console / top bar is).
-    if (g_debug && g_enabled && VtRva(frame) == 0x93E604 && y < 0.2f) {
+    if (g_debug && g_enabled && VtRva(frame) == VT(StatBar) && y < 0.2f) {
         static int dumped; if (!dumped) { dumped = 1; DumpSimpleLevels(frame); }
     }
     // With the bars drawn under the console (HealthBarsUnderConsole=1) its panels and decorated edges cover them,
     // but its see-through parts (portrait, info panel, minimap background) would still show them: hide bars that
     // lie below the console's top line (0.13; a bar is about 0.005 high). Without it, hide everything up to the
     // top of the decorated edge (minimap frame, command card, about 0.17).
-    if (g_enabled && g_worldFull && VtRva(frame) == 0x93E604) {
+    if (g_enabled && g_worldFull && VtRva(frame) == VT(StatBar)) {
         const float L = g_e, R = g_e + 0.8f;
         typedef float (__fastcall *GetWidth_t)(u32 self, u32 edx);
         float hw = ((GetWidth_t)(*(u32**)frame)[6])(frame, 0) * 0.5f;   // bar width (virtual GetWidth, as the game uses)
@@ -363,12 +455,12 @@ static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 fla
     float dxL = dx, dxR = -dx;
     // GlueSpriteLayerTopRight (right-hand menu decorations: chains, panel frames, post):
     // its model is authored for a 0.8-wide screen, so slide the whole layer to the right edge.
-    if (g_enabled && g_glue && g_menuEdges && ((u32)__builtin_return_address(0) - g_base) == 0x57BB33) {
+    if (g_enabled && g_glue && g_menuEdges && ((u32)__builtin_return_address(0) - g_base) == G->retGlueTopRight) {
         dxL = 2.0f * g_e; dxR = 2.0f * g_e;
         dlogf_("GlueSpriteLayerTopRight shifted by %.4f", dxL);
     }
     float dyT = 0.0f, dyB = 0.0f;
-    if (g_enabled && g_scaleOn && VtRva(frame) == 0x96662C) {                 // CLoading: 0.8k x 0.6k, centred
+    if (g_enabled && g_scaleOn && VtRva(frame) == VT(Loading)) {                 // CLoading: 0.8k x 0.6k, centred
         float k = g_uiH_f / 0.6f;
         dxL = (g_uiW_f - 0.8f * k) * 0.5f; dxR = -dxL;
     }
@@ -379,7 +471,6 @@ static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 fla
 
 
 // ---- world projection: keep the original zoom and screen position when the world view is extended to full height ----
-#define RVA_Perspective 0x7B66F0
 typedef void (__fastcall *Persp_t)(u32 out, u32 edx, float fovY, float aspect, float zn, float zf);
 static Persp_t orig_Persp;
 static float g_zoom = 1.0f;
@@ -447,7 +538,6 @@ static void __fastcall Persp_hook(u32 out, u32 edx, float fovY, float aspect, fl
 }
 
 // ---- with the world at full height, keep the console area itself black (its textures have see-through holes) ----
-#define RVA_RenderWorld 0x395900
 typedef int (__fastcall *RenderWorld_t)(u32 ecx, u32 edx);
 static RenderWorld_t orig_RenderWorld;
 typedef struct { DWORD X, Y, Width, Height; float MinZ, MaxZ; } VP8;
@@ -465,10 +555,58 @@ static int IsD3D8Device(u32* vt)
     return state;
 }
 
+// the game's Direct3D device and its back buffer size. 1.26: a Direct3D 8 device at a known place in the graphics
+// object; 1.27: Direct3D 9, found once by asking the pointers in that object for the device interface
+typedef struct { u32 dev; int clear, setVp, getVp, W, H; } RenderDev;
+static const GUID kIID_D3DDevice9 = {0xd0223b96,0xbf7a,0x43fd,{0x92,0xbd,0xa4,0x3b,0x0d,0x82,0xb9,0xeb}};
+static int GetRenderDevice(RenderDev* d)
+{
+    u32 gx = *(u32*)(g_base + G->gx);
+    if (!gx || IsBadReadPtr((void*)gx, 4)) return 0;
+    if (G->gxDevice) {
+        if (IsBadReadPtr((void*)gx, G->gxDevice + 4)) return 0;
+        u32 dev = *(u32*)(gx + G->gxDevice);
+        if (!dev || IsBadReadPtr((void*)dev, 4) || !IsD3D8Device(*(u32**)dev)) return 0;
+        d->dev = dev; d->clear = 36; d->setVp = 40; d->getVp = 41;
+        d->W = *(int*)(gx + G->gxWidth); d->H = *(int*)(gx + G->gxWidth + 4);
+        return d->W > 0 && d->H > 0;
+    }
+    typedef HRESULT (__stdcall *QI_t)(u32, const GUID*, void**);
+    typedef ULONG (__stdcall *Rel_t)(u32);
+    static int ofs = -1;
+    if (ofs == -1) {                                  // 1.27: the device sits at the same place as in 1.26; check it once
+        ofs = -2;
+        u32 p = IsBadReadPtr((void*)gx, 0x588) ? 0 : *(u32*)(gx + 0x584);
+        u32* vt = (p && !IsBadReadPtr((void*)p, 4)) ? *(u32**)p : NULL;
+        u32 q = 0; HRESULT hr = E_POINTER;
+        if (vt && !IsBadReadPtr(vt, 119 * 4)) hr = ((QI_t)vt[0])(p, &kIID_D3DDevice9, (void**)&q);
+        char mn[MAX_PATH] = "?"; HMODULE vm = NULL;
+        if (vt && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[0], &vm) && vm)
+            GetModuleFileNameA(vm, mn, sizeof mn);
+        if (hr == S_OK && q) { ((Rel_t)(*(u32**)q)[2])(q); ofs = 0x584; logf_("Direct3D 9 device %08X (%s)", p, mn); }
+        else logf_("Direct3D 9 device not found (%08X, %08lX, %s), console backing off", p, hr, mn);
+    }
+    if (ofs < 0) return 0;
+    u32 dev = *(u32*)(gx + ofs);
+    if (!dev || IsBadReadPtr((void*)dev, 4)) return 0;
+    u32* vt = *(u32**)dev;
+    d->dev = dev; d->clear = 43; d->setVp = 47; d->getVp = 48;
+    // back buffer size = size of render target 0 (IDirect3DDevice9::GetRenderTarget, IDirect3DSurface9::GetDesc)
+    typedef HRESULT (__stdcall *GetRT_t)(u32, DWORD, u32*);
+    typedef HRESULT (__stdcall *GetDesc_t)(u32, DWORD*);
+    u32 rt = 0; DWORD desc[8];
+    if (((GetRT_t)vt[38])(dev, 0, &rt) != S_OK || !rt) return 0;
+    HRESULT hr = ((GetDesc_t)(*(u32**)rt)[12])(rt, desc);
+    ((Rel_t)(*(u32**)rt)[2])(rt);
+    if (hr != S_OK) return 0;
+    d->W = (int)desc[6]; d->H = (int)desc[7];
+    return d->W > 0 && d->H > 0;
+}
+
 // ---- DotA top hero bar: its slot frames are placed for the 0.8-wide interface by a path the hooks do not see ----
 static void DotATopBarFix(void)
 {
-    u32 top = *(u32*)(g_base + 0xACE758);
+    u32 top = *(u32*)(g_base + G->simpleTop);
     if (!top || IsBadReadPtr((void*)top, 0x200) || !orig_SetAbsPoint) return;
     int budget = 6000;
     for (int L = 0; L < 6; L++) {
@@ -476,10 +614,10 @@ static void DotATopBarFix(void)
         while (node > 0 && budget-- > 0 && !IsBadReadPtr((void*)node, 12)) {
             u32 f = *(u32*)(node + 8);
             node = *(int*)(node + 4);
-            if (!f || IsBadReadPtr((void*)f, 0x30) || VtRva(f) != 0x96DFB4) continue;
+            if (!f || IsBadReadPtr((void*)f, 0x30) || VtRva(f) != VT(SimpleFrame)) continue;
             u32 po = *(u32*)(f + 8 + 6 * 4);
-            if (!po || IsBadReadPtr((void*)po, 0x14) || *(u32*)po - g_base != 0x97076C) continue;
-            if (VtRva(*(u32*)(po + 4)) != 0x9362F4 || *(u32*)(po + 8) != 6) continue;
+            if (!po || IsBadReadPtr((void*)po, 0x14) || *(u32*)po - g_base != VT(FramePointRel)) continue;
+            if (VtRva(*(u32*)(po + 4)) != VT(GameUIFrame) || *(u32*)(po + 8) != 6) continue;
             float x = *(float*)(po + 12), y = *(float*)(po + 16);
             if (y < 0.55f || y > 0.6f) continue;
             if (x < 0.1f || x > 0.65f) continue;
@@ -500,20 +638,15 @@ static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
         if (st != lastSt) { lastSt = st; dlogf_("interface state %u (ui %08X)", st, g_gameUI); }
     }
     if (!(g_enabled && g_consoleBacking && ((g_worldFull && g_worldBottomDefault && g_worldTopDefault) || g_dotaRun))) return r;
-    u32 gx = *(u32*)(g_base + 0xACBD40);
-    if (!gx || IsBadReadPtr((void*)gx, 0x590)) return r;
-    u32 dev = *(u32*)(gx + 0x584);
-    if (!dev || IsBadReadPtr((void*)dev, 4)) return r;
-    u32* vt = *(u32**)dev;
-    if (!IsD3D8Device(vt)) return r;                             // OpenGL mode or unknown renderer: leave it alone
+    RenderDev rd;
+    if (!GetRenderDevice(&rd)) return r;                         // OpenGL mode or unknown renderer: leave it alone
+    u32 dev = rd.dev; u32* vt = *(u32**)dev; int W = rd.W, H = rd.H;
     typedef HRESULT (__stdcall *SetVP_t)(u32, const VP8*);
     typedef HRESULT (__stdcall *GetVP_t)(u32, VP8*);
     typedef HRESULT (__stdcall *Clear_t)(u32, DWORD, const RECT8*, DWORD, DWORD, float, DWORD);
-    VP8 old; if (((GetVP_t)vt[41])(dev, &old) != 0) return r;
-    int W = *(int*)(gx + 0x9C), H = *(int*)(gx + 0xA0);
-    if (W <= 0 || H <= 0) return r;
+    VP8 old; if (((GetVP_t)vt[rd.getVp])(dev, &old) != 0) return r;
     VP8 full = { 0, 0, (DWORD)W, (DWORD)H, old.MinZ, old.MaxZ };
-    ((SetVP_t)vt[40])(dev, &full);
+    ((SetVP_t)vt[rd.setVp])(dev, &full);
     LONG x1 = (LONG)(g_e / g_uiW_f * W + 0.5f), x2 = (LONG)((g_e + 0.8f) / g_uiW_f * W + 0.5f);
     // in cinematic mode the letterbox (semi-transparent stone texture) spans the whole width; as in the
     // original, it must lie on black, not on the world
@@ -522,15 +655,31 @@ static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
         { x1, (LONG)(H * (1.0f - WORLD_B0 / g_uiH_f)), x2, H },            // console band
         { x1, 0, x2, (LONG)(H * (-WORLD_T0 / g_uiH_f) + 0.5f) }            // thin strip under the top bar
     };
-    ((Clear_t)vt[36])(dev, g_dotaRun ? 1 : 2, rc, 1 /*D3DCLEAR_TARGET*/, 0xFF000000, 1.0f, 0);   // DotA: own top bar
+    ((Clear_t)vt[rd.clear])(dev, g_dotaRun ? 1 : 2, rc, 1 /*D3DCLEAR_TARGET*/, 0xFF000000, 1.0f, 0);   // DotA: own top bar
     // The 3D portraits (unit portrait in the console, speaker portrait of cinematics and transmissions) are
     // drawn later with depth testing. In the original nothing of the world is drawn in these strips, so the
     // depth buffer there is empty; here the world wrote its depth first and would hide parts of the portraits.
     // Reset the depth in both strips across the whole width (nothing else 3D is drawn there).
     RECT8 rz[2] = { { 0, rc[0].y1, W, H }, { 0, 0, W, rc[1].y2 } };
-    ((Clear_t)vt[36])(dev, g_dotaRun ? 1 : 2, rz, 2 /*D3DCLEAR_ZBUFFER*/, 0, 1.0f, 0);
-    ((SetVP_t)vt[40])(dev, &old);
+    ((Clear_t)vt[rd.clear])(dev, g_dotaRun ? 1 : 2, rz, 2 /*D3DCLEAR_ZBUFFER*/, 0, 1.0f, 0);
+    ((SetVP_t)vt[rd.setVp])(dev, &old);
     return r;
+}
+
+// address of Game.dll's import slot for dll!name (0 if it has none)
+static u32 FindImport(const char* dll, const char* name)
+{
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(g_base + ((IMAGE_DOS_HEADER*)g_base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY dd = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dd.VirtualAddress) return 0;
+    for (IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)(g_base + dd.VirtualAddress); d->Name; d++) {
+        if (_stricmp((const char*)(g_base + d->Name), dll)) continue;
+        u32* names = (u32*)(g_base + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
+        for (int i = 0; names[i]; i++)
+            if (!(names[i] & 0x80000000) && !strcmp((const char*)(g_base + names[i] + 2), name))
+                return g_base + d->FirstThunk + i * 4;
+    }
+    return 0;
 }
 
 static u32 MakeTrampoline(u32 target, int len)
@@ -725,19 +874,28 @@ static int BuildFadeCache(HANDLE mpq, const char* name, DWORD scope)
 //      rate changes. The map is recognised by its script naming the helper; the script is read during loading,
 //      seconds before the game interface is built. ----
 static double g_wideD; static float g_wideE, g_pickTopWide; static int g_barLevelPatched;
+// 1.27 has the ortho edges of the UI projection as immediates in the code: rewrite them whenever the size changes
+static int g_orthoPatched;
+static void SyncImmediates(void)
+{
+    if (!g_orthoPatched || !G->orthoImm) return;
+    if (*(float*)(g_base + G->orthoW) != g_uiW_f) WriteMem(g_base + G->orthoW, &g_uiW_f, 4);
+    if (g_uiScale != 1.0f && *(float*)(g_base + G->orthoH) != g_uiH_f) WriteMem(g_base + G->orthoH, &g_uiH_f, 4);
+}
 static void SetDotAMode(int on)
 {
     if (on == g_dotaMode || !g_wideD) return;
-    static const uint8_t lvlRaise = 0x01, lvlKeep = 0x00;
     if (on) {
         g_enabled = 0; g_dotaMode = 1;
         g_uiW_d = 0.8; g_uiW_f = 0.8f; g_e = 0.0f; g_pickTop = 0.577f; g_uiH_d = 0.6; g_uiH_f = 0.6f; g_f = 0.0f;
-        if (g_barLevelPatched) WriteMem(g_base + 0x379B5A, &lvlRaise, 1);
+        SyncImmediates();
+        if (g_barLevelPatched) WriteMem(g_base + G->barRaiseAt, &G->barRaiseOn, 1);
         logf_("DotA Allstars map (DracoL1ch): mod off while it runs (DotAOriginal=1)");
     } else {
         g_uiW_d = g_wideD; g_uiW_f = (float)g_wideD; g_e = g_wideE; g_pickTop = g_pickTopWide;
         g_uiH_d = 0.6; g_uiH_f = 0.6f; g_f = 0.0f;
-        if (g_barLevelPatched) WriteMem(g_base + 0x379B5A, &lvlKeep, 1);
+        SyncImmediates();
+        if (g_barLevelPatched) WriteMem(g_base + G->barRaiseAt, &G->barRaiseOff, 1);
         g_dotaMode = 0; g_enabled = 1;
         logf_("DotA Allstars map left: mod on again");
     }
@@ -791,13 +949,14 @@ static void SetUIScaleActive(int on)
     g_scaleOn = on;
     g_uiH_d = on ? 0.6 / g_uiScale : 0.6; g_uiH_f = (float)g_uiH_d; g_f = (float)(g_uiH_d - 0.6);
     g_uiW_d = g_uiH_d * g_aspect; g_uiW_f = (float)g_uiW_d; g_e = (float)((g_uiW_d - 0.8) * 0.5);
+    SyncImmediates();
     if (!on) g_scaleGameSeen = 0;
     logf_("UI scale %s: screen %.4f x %.4f", on ? "on" : "off", g_uiW_d, g_uiH_d);
     u32 r = g_screenRoot;
     if (r && !IsBadReadPtr((void*)r, 0x60)) {
         typedef void (__fastcall *SetSize_t)(u32 self, u32 edx, float v);
-        ((SetSize_t)(g_base + 0x605D90))(r, 0, g_uiW_f);
-        ((SetSize_t)(g_base + 0x605DB0))(r, 0, g_uiH_f);
+        ((SetSize_t)(g_base + G->setWidth))(r, 0, g_uiW_f);
+        ((SetSize_t)(g_base + G->setHeight))(r, 0, g_uiH_f);
     }
 
 }
@@ -805,7 +964,7 @@ static void DotAModeCheckExit(u32 parent)
 {
     if (IsGameUIRoot(parent)) { g_dotaGameSeen = 1; return; }
     u32 ui = g_gameUI;
-    int uiAlive = ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + RVA_GameUIVtbl;
+    int uiAlive = ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + VT(GameUI);
     if (g_dotaGameSeen && !uiAlive && IsScreenRoot(parent)) { g_dotaGameSeen = 0; SetDotAMode(0); SetDotARun(0); }
 }
 // The script is also read when a map is only selected in the menus (lobby settings): remember the result and switch
@@ -820,22 +979,22 @@ static void SetDotAPending(int found)
 static void DotAFrameEvent(u32 frame, u32 parent)
 {
     u32 vt = VtRva(frame);
-    if (vt == 0x96662C || VtRva(parent) == 0x96662C) {               // CLoading (or a frame placed on it)
+    if (vt == VT(Loading) || VtRva(parent) == VT(Loading)) {               // CLoading (or a frame placed on it)
         if (!g_loadingActive) logf_("loading screen (DotA map selected: %d)", g_dotaPending);
         if (!g_scaleOn && !(g_dotaPending && g_dotaOrig)) SetUIScaleActive(1);
         g_loadingActive = 1; g_dotaLoading = g_dotaPending;
-    } else if (vt == 0x967460) {                                     // CScoreScreen
+    } else if (vt == VT(Score)) {                                     // CScoreScreen
         g_loadingActive = 0; g_dotaLoading = 0;
         if (g_dotaMode) SetDotAMode(0);
         if (g_dotaRun) SetDotARun(0);
     }
     // the score screen keeps its original size: its parts can be placed on it before the screen frame itself
-    if (vt == 0x967460 || VtRva(parent) == 0x967460) SetUIScaleActive(0);
+    if (vt == VT(Score) || VtRva(parent) == VT(Score)) SetUIScaleActive(0);
     if (g_scaleOn) {
         if (IsGameUIRoot(parent)) g_scaleGameSeen = 1;
         else if (g_scaleGameSeen && !g_loadingActive && IsScreenRoot(parent)) {
             u32 ui = g_gameUI;
-            if (!(ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + RVA_GameUIVtbl)) SetUIScaleActive(0);
+            if (!(ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + VT(GameUI))) SetUIScaleActive(0);
         }
     }
     if (IsGameUIRoot(parent)) {
@@ -874,7 +1033,7 @@ static void ReadLoadingModel(HANDLE mpq, const char* scriptName, DWORD scope)
 }
 static void CheckMapScript(HANDLE mpq, const char* name, DWORD scope)
 {
-    if (!g_wideD || !S_Read || !S_Size || !S_Close) return;
+    if (!g_wideD || !S_Read || !S_Size || !S_Close || !G->dota) return;   // (the DotA helpers exist for 1.26 only)
     const char* b = strrchr(name, '\\'); b = b ? b + 1 : name;
     if (!SameName(b, "war3map.j")) return;
     HANDLE h = 0;
@@ -1919,10 +2078,13 @@ static void InstallFadeFix(void)
     S_Read  = (SRead_t)GetProcAddress(st, (LPCSTR)269);
     S_Size  = (SSize_t)GetProcAddress(st, (LPCSTR)265);
     S_Close = (SClose_t)GetProcAddress(st, (LPCSTR)253);
-    if (!f || !S_Read || !S_Size || !S_Close || memcmp((void*)f, "\x81\xEC\x1C\x01\x00\x00", 6) != 0) {
+    int len = 0;
+    if (f && !memcmp((void*)f, "\x81\xEC\x1C\x01\x00\x00", 6)) len = 6;                  // 1.26
+    else if (f && !memcmp((void*)f, "\x55\x8B\xEC\x81\xEC\x1C\x01\x00\x00", 9)) len = 9;  // 1.27
+    if (!len || !S_Read || !S_Size || !S_Close) {
         logf_("Storm.dll not recognised, campaign fade fix off"); return;
     }
-    orig_SOpenEx = (SOpenEx_t)MakeTrampoline(f, 6);
+    orig_SOpenEx = (SOpenEx_t)MakeTrampoline(f, len);
     if (orig_SOpenEx) WriteJmp(f, (u32)SOpenEx_hook);
 }
 
@@ -1930,7 +2092,6 @@ static void InstallFadeFix(void)
 //      see them). If W3TrueWidescreen\MpcVideoRenderer.ax is present, it is put into the game's filter graph before the
 //      game renders the movie, so the video goes through MPC Video Renderer (RTX Video HDR / super resolution).
 //      The .ax is loaded directly from the game folder; it does not have to be registered. ----
-#define RVA_IAT_CoCreateInstance 0x86DAA8
 typedef HRESULT (WINAPI *CoCreate_t)(REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID*);
 typedef HRESULT (WINAPI *DllGetClassObject_t)(REFCLSID, REFIID, LPVOID*);
 static CoCreate_t orig_CoCreate;
@@ -2212,7 +2373,7 @@ static void SubRenderLines(const WCHAR** lines, int nl)
     free(outline); free(fill);
     SelectObject(dc, ob); DeleteObject(bm); SelectObject(dc, of); DeleteObject(font); DeleteDC(dc);
     static uint32_t* prev[2]; free(prev[1]); prev[1] = prev[0]; prev[0] = px;  // the renderer may still read the last one
-    int y0 = *(int*)(g_base + 0xACC088);                                       // under the picture, as the game draws them
+    int y0 = *(int*)(g_base + G->subY0);                                       // under the picture, as the game draws them
     g_subBw = bw; g_subBh = bh; g_subBx = (W - bw) / 2;
     g_subBy = (y0 > 0 && y0 + bh < H) ? y0 + 8 : H - bh - H / 20;
     g_subId++;
@@ -2222,8 +2383,8 @@ static void SubUpdate(void)
 {
     static WCHAR last[2048]; WCHAR cur[2048]; cur[0] = 0;
     const WCHAR* lines[SUB_MAXL]; int nl = 0;
-    int count = *(int*)(g_base + 0xACC6BC);
-    u32* idx = *(u32**)(g_base + 0xACC6C0); uint8_t* tab = *(uint8_t**)(g_base + 0xACC6D0);
+    int count = *(int*)(g_base + G->subCount);
+    u32* idx = *(u32**)(g_base + G->subIdx); uint8_t* tab = *(uint8_t**)(g_base + G->subTab);
     if (count > 0 && idx && tab && !IsBadReadPtr(idx, count * 4)) {
         for (int i = 0; i < count && nl < SUB_MAXL; i++) {
             const WCHAR* t = *(const WCHAR**)(tab + idx[i] * 20 + 8);
@@ -2236,6 +2397,19 @@ static void SubUpdate(void)
     lstrcpyW(last, cur);
     SubRenderLines(lines, nl);
 }
+// size of the window the movie is shown in: 1.26 keeps it in globals (the display mode set for the movie),
+// 1.27 places the movie in the game window's client area
+static void MovieWindowSize(void* anyGraphItf, int* w, int* h)
+{
+    *w = *h = 0;
+    if (G->movieW) { *w = *(int*)(g_base + G->movieW); *h = *(int*)(g_base + G->movieH); return; }
+    static const GUID kIID_IVideoWindow = {0x56a868b4,0x0ad4,0x11ce,{0xb0,0x3a,0x00,0x20,0xaf,0x0b,0xa7,0x70}};
+    void* vw = NULL; OAHWND_ owner = 0; RECT r;
+    if (FAILED(((QI_t)VTBL(anyGraphItf)[0])(anyGraphItf, &kIID_IVideoWindow, &vw)) || !vw) return;
+    typedef HRESULT (__stdcall *GetOwner_t)(void*, OAHWND_*);
+    if (SUCCEEDED(((GetOwner_t)VTBL(vw)[30])(vw, &owner)) && owner && GetClientRect((HWND)owner, &r)) { *w = r.right; *h = r.bottom; }
+    ((Release_t)VTBL(vw)[2])(vw);
+}
 static void ConnectSubtitles(void* anyGraphItf)
 {
     void* fg = NULL; void* en = NULL; void* f = NULL; ULONG got = 0;
@@ -2244,10 +2418,14 @@ static void ConnectSubtitles(void* anyGraphItf)
         while (((Next_t)VTBL(en)[3])(en, 1, &f, &got) == S_OK && got) {
             void* c = NULL;
             if (SUCCEEDED(((QI_t)VTBL(f)[0])(f, &kIID_SubRenderConsumer, &c)) && c) {
-                g_subW = *(int*)(g_base + 0xACC698); g_subH = *(int*)(g_base + 0xACC69C);
+                MovieWindowSize(anyGraphItf, &g_subW, &g_subH);
                 g_subConsumer = c;
                 typedef HRESULT (__stdcall *Connect_t)(void*, void*);
                 HRESULT hr = ((Connect_t)VTBL(c)[20])(c, &g_subProvider);
+                // keep no reference: the renderer calls the provider only while it exists (and disconnects it when
+                // it goes). A reference kept here kept the renderer alive after its movie, and MPC Video Renderer
+                // refuses to create a second instance while one exists: the next movie fell back to the system renderer.
+                ((Release_t)VTBL(c)[2])(c);
                 logf_("movies: subtitle provider connected to the renderer (%08lX), frame %dx%d", hr, g_subW, g_subH);
             }
             ((Release_t)VTBL(f)[2])(f);
@@ -2326,7 +2504,7 @@ static HRESULT __stdcall SetWinPos_wrap(void* vw, long l, long t, long w, long h
     // a flip-model swap chain that covers the screen is shown by Windows directly (independent flip),
     // as in a fullscreen video player, instead of being composited as a smaller window.
     long ww = w, wh = h, dl = 0, dt = 0;
-    int mw = *(int*)(g_base + 0xACC698), mh = *(int*)(g_base + 0xACC69C);  // movie window size (game globals)
+    int mw, mh; MovieWindowSize(vw, &mw, &mh);
     if (g_movieFullWin && mw >= w && mh >= t + h && mw > 0 && mh > 0) { ww = mw; wh = mh; dl = l; dt = t; l = 0; t = 0; }
     HRESULT hr = ((Rect4_t)VTBL(vw)[0x9c / 4])(vw, l, t, ww, wh);      // IVideoWindow::SetWindowPosition
     void* bv = NULL;
@@ -2504,30 +2682,24 @@ static void InstallMovieRenderer(void)
     strcpy(g_mpcvrPath, p);
     // The game sizes the movie window from IBasicVideo::get_VideoWidth/Height, which MPC Video Renderer does not
     // implement (the values stay uninitialised, the window lands off screen). Ask GetVideoSize instead.
-    static const uint8_t kOrigSize[] = { 0x8b,0x08,0x8d,0x54,0x24,0x0c,0x52,0x50,0x8b,0x41,0x28,0xff,0xd0,0x8b,0x04,0x24,
-        0x8b,0x08,0x8d,0x54,0x24,0x08,0x52,0x50,0x8b,0x41,0x2c,0xff,0xd0,0x8b,0x04,0x24,0x8b,0x08,0x8b,0x51,0x08,0x50,0xff,0xd2,0xeb,0x10 };
-    static const uint8_t kNewSize[] = {
-        0x8b,0x08,                         // mov  ecx, [eax]
-        0x8d,0x54,0x24,0x08, 0x52,         // lea  edx, [esp+8]  (height) ; push edx
-        0x8d,0x54,0x24,0x10, 0x52,         // lea  edx, [esp+10h] (width) ; push edx
-        0x50,                              // push eax
-        0xff,0x91,0x88,0x00,0x00,0x00,     // call [ecx+88h]  IBasicVideo::GetVideoSize
-        0x8b,0x04,0x24,0x8b,0x08,0x8b,0x51,0x08,0x50,0xff,0xd2,   // pBV->Release()
-        0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,
-        0xeb,0x10 };                       // jmp to the window placement code (unchanged)
-    if (sizeof kNewSize == sizeof kOrigSize && memcmp((void*)(g_base + 0x52B55E), kOrigSize, sizeof kOrigSize) == 0)
-        WriteMem(g_base + 0x52B55E, kNewSize, sizeof kNewSize);
+    if (CodeIs(&G->movieSize) && CodeIs(&G->moviePos))
+        WriteMem(g_base + G->movieSize.rva, G->movieSizeNew, G->movieSize.len);   // (see the address table)
     else { logf_("movies: movie window code not recognised, MPC Video Renderer off"); g_mpcvrGetClass = NULL; g_mpcvrPath[0] = 0; return; }
     // MPC Video Renderer draws into the rectangle given by IBasicVideo::SetDestinationPosition, which the game
     // never calls (the system renderer defaults to the whole window). Route the game's SetWindowPosition call
     // through a wrapper that also sets the destination to the whole window.
-    static const uint8_t kOrigPos[] = { 0x8b,0x87,0x9c,0x00,0x00,0x00, 0x52, 0xff,0xd0 };
-    if (memcmp((void*)(g_base + 0x52B5D3), kOrigPos, sizeof kOrigPos) == 0) {
-        uint8_t p[6] = { 0xb8, 0, 0, 0, 0, 0x90 };               // mov eax, SetWinPos_wrap ; nop
-        u32 f = (u32)SetWinPos_wrap; memcpy(p + 1, &f, 4);
-        WriteMem(g_base + 0x52B5D3, p, 6);
-    } else { logf_("movies: movie window code not recognised, MPC Video Renderer off"); g_mpcvrGetClass = NULL; g_mpcvrPath[0] = 0; return; }
-    u32 iat = g_base + RVA_IAT_CoCreateInstance;
+    {
+        u32 f = (u32)SetWinPos_wrap;
+        if (G->moviePos.len == 9) {                                // 1.26: mov eax,[edi+9Ch] -> mov eax, SetWinPos_wrap ; nop
+            uint8_t p[6] = { 0xb8, 0, 0, 0, 0, 0x90 }; memcpy(p + 1, &f, 4);
+            WriteMem(g_base + G->moviePos.rva, p, 6);
+        } else {                                                   // 1.27: mov edx,[ecx] ; call [edx+9Ch] -> mov eax, SetWinPos_wrap ; call eax ; nop
+            uint8_t p[8] = { 0xb8, 0, 0, 0, 0, 0xff, 0xd0, 0x90 }; memcpy(p + 1, &f, 4);
+            WriteMem(g_base + G->moviePos.rva, p, 8);
+        }
+    }
+    u32 iat = FindImport("ole32.dll", "CoCreateInstance");
+    if (!iat) { logf_("movies: CoCreateInstance import not found, MPC Video Renderer off"); g_mpcvrGetClass = NULL; g_mpcvrPath[0] = 0; return; }
     if (*(u32*)iat != (u32)GetProcAddress(GetModuleHandleA("ole32.dll"), "CoCreateInstance") &&
         *(u32*)iat != (u32)GetProcAddress(GetModuleHandleA("combase.dll"), "CoCreateInstance"))
         dlogf_("movies: CoCreateInstance import is already hooked by something else, chaining");
@@ -2544,7 +2716,7 @@ static void InstallMovieRenderer(void)
 //      covers the native screen (the game already scales the picture to the window width). ----
 static void PatchCallGamma(u32 at)     // call [SetDeviceGammaRamp]  ->  add esp,8 (drop its 2 arguments)
 {
-    uint8_t want[6] = { 0xff, 0x15 }; u32 slot = g_base + 0x86D05C; memcpy(want + 2, &slot, 4);
+    uint8_t want[6] = { 0xff, 0x15 }; u32 slot = FindImport("gdi32.dll", "SetDeviceGammaRamp"); memcpy(want + 2, &slot, 4);
     static const uint8_t repl[6] = { 0x83, 0xc4, 0x08, 0x90, 0x90, 0x90 };
     if (!memcmp((void*)at, want, 6)) WriteMem(at, repl, 6);
     else logf_("movies: gamma code at %06X not recognised", at - g_base);
@@ -2553,14 +2725,13 @@ static void PatchCallGamma(u32 at)     // call [SetDeviceGammaRamp]  ->  add esp
 //      panels are BACKGROUND, a health bar's fill is ARTWORK, so bars end up on top of the console. Create the
 //      fill of the unit bars (CStatBar) in the BACKGROUND layer too; only unit bars, console bars stay as they are.
 typedef int (__fastcall *SBSetTex_t)(u32 self, u32 edx, u32 a1, u32 a2);
-static int g_barLevelPatched;
 static int __fastcall StatBarSetTexture_wrap(u32 self, u32 edx, u32 a1, u32 a2)
 {
-    if (g_dotaMode) return ((SBSetTex_t)(g_base + 0x60E610))(self, edx, a1, a2);
+    if (g_dotaMode) return ((SBSetTex_t)(g_base + G->sbSetTex))(self, edx, a1, a2);
     static const uint8_t bg = 0x00, art = 0x02;
-    WriteMem(g_base + 0x60E692, &bg, 1);                  // CSimpleTexture(parent, layer 2 -> 0, ...)
-    int r = ((SBSetTex_t)(g_base + 0x60E610))(self, edx, a1, a2);
-    WriteMem(g_base + 0x60E692, &art, 1);
+    WriteMem(g_base + G->sbLayerPush + 3, &bg, 1);       // CSimpleTexture(parent, layer 2 -> 0, ...)
+    int r = ((SBSetTex_t)(g_base + G->sbSetTex))(self, edx, a1, a2);
+    WriteMem(g_base + G->sbLayerPush + 3, &art, 1);
     return r;
 }
 // The simple UI is drawn level by level (depth in the frame tree), each level layer by layer, frames of one
@@ -2572,37 +2743,37 @@ typedef void (__fastcall *TopRegister_t)(u32 top, u32 edx, u32 frame, u32 level)
 static void BarsFirst(void)
 {
     if (g_dotaMode) return;
-    u32 top = *(u32*)(g_base + 0xACE758);                      // CSimpleTop
+    u32 top = *(u32*)(g_base + G->simpleTop);                      // CSimpleTop
     if (!top || IsBadReadPtr((void*)top, 0x200)) return;
     u32 others[96]; int n = 0;
     int node = *(int*)(top + 0x194);                            // level 0 list: first node
     while (node > 0 && n < 96 && !IsBadReadPtr((void*)node, 12)) {
         u32 f = *(u32*)(node + 8);
-        if (f && VtRva(f) != 0x93E604 && f != *(u32*)(top + 0x16C)) others[n++] = f;   // not bars, not the mouse focus
+        if (f && VtRva(f) != VT(StatBar) && f != *(u32*)(top + 0x16C)) others[n++] = f;   // not bars, not the mouse focus
         node = *(int*)(node + 4);
     }
-    TopRegister_t reg = (TopRegister_t)(g_base + 0x60C760);
+    TopRegister_t reg = (TopRegister_t)(g_base + G->topRegister.rva);
     for (int i = 0; i < n; i++) reg(top, 0, others[i], 0);
     static int logged; if (logged++ < 3) dlogf_("health bars first: %d other top-level frames moved behind", n);
 }
 static int __fastcall StatBarShow_hook(u32 self, u32 edx)
 {
     int wasShown = *(u32*)(self + 0x94);
-    int r = ((FrameShow_t)(g_base + 0x609B50))(self, edx);
+    int r = ((FrameShow_t)(g_base + G->frameShow))(self, edx);
     if (!wasShown && *(u32*)(self + 0x94) && *(u32*)(self + 0x84) == 0) BarsFirst();
     return r;
 }
 typedef u32 (__fastcall *StatBarCtor_t)(u32 self, u32 edx, u32 a1, u32 a2, u32 a3);
 static u32 __fastcall StatBarCtor_wrap(u32 self, u32 edx, u32 a1, u32 a2, u32 a3)
 {
-    u32 r = ((StatBarCtor_t)(g_base + 0x359CC0))(self, edx, a1, a2, a3);
+    u32 r = ((StatBarCtor_t)(g_base + G->statBarCtor))(self, edx, a1, a2, a3);
     if (*(u32*)(self + 0x94) && *(u32*)(self + 0x84) == 0) BarsFirst();
     static int n; if (n++ < 3) dlogf_("health bar created %08X (level %u, shown %u)", self, *(u32*)(self + 0x84), *(u32*)(self + 0x94));
     return r;
 }
 static void DumpSimpleLevels(u32 bar)
 {
-    u32 top = *(u32*)(g_base + 0xACE758);
+    u32 top = *(u32*)(g_base + G->simpleTop);
     if (!top) return;
     logf_("bar %08X: level %u shown %u parent %08X (vt %06X)", bar, *(u32*)(bar + 0x84), *(u32*)(bar + 0x94), *(u32*)(bar + 0x6C), VtRva(*(u32*)(bar + 0x6C)));
     for (int L = 0; L < 10; L++) {
@@ -2620,23 +2791,21 @@ static void DumpSimpleLevels(u32 bar)
 static void InstallHealthBarLayer(void)
 {
     if (!g_hpUnder || !g_worldFull) return;
-    u32 at = g_base + 0x359E4A;
-    if (*(uint8_t*)at != 0xE8 || at + 5 + *(int32_t*)(at + 1) != g_base + 0x60E610 ||
-        memcmp((void*)(g_base + 0x60E68F), "\x6a\x01\x6a\x02\x6a\x00", 6)) { logf_("health bar code not recognised"); g_hpUnder = 0; return; }
+    u32 at = g_base + G->sbSetTexCall;
+    if (*(uint8_t*)at != 0xE8 || at + 5 + *(int32_t*)(at + 1) != g_base + G->sbSetTex ||
+        memcmp((void*)(g_base + G->sbLayerPush), "\x6a\x01\x6a\x02\x6a\x00", 6)) { logf_("health bar code not recognised"); g_hpUnder = 0; return; }
     uint8_t c[5] = { 0xE8 }; int32_t rel = (int32_t)((u32)StatBarSetTexture_wrap - (at + 5)); memcpy(c + 1, &rel, 4);
     WriteMem(at, c, 5);
-    // right after creating a unit bar the game raises its frame level by one (0x379B58: add eax,1 before
+    // right after creating a unit bar the game raises its frame level by one (1.26: add eax,1 / 1.27: inc eax before
     // SetFrameLevel) so that it is drawn after the top-level console: keep it at the console's level instead
-    static const uint8_t kRaise[] = { 0x8B, 0x81, 0x84, 0x00, 0x00, 0x00, 0x83, 0xC0, 0x01 };
-    if (!memcmp((void*)(g_base + 0x379B52), kRaise, sizeof kRaise)) { static const uint8_t z = 0x00; WriteMem(g_base + 0x379B5A, &z, 1); g_barLevelPatched = 1; }
+    if (CodeIs(&G->barRaise)) { WriteMem(g_base + G->barRaiseAt, &G->barRaiseOff, 1); g_barLevelPatched = 1; }
     else logf_("health bar level code not recognised");
-    u32 slot = g_base + 0x93E604 + 0x68;                        // CStatBar vtable: Show
-    if (*(u32*)slot == g_base + 0x609B50 && !memcmp((void*)(g_base + 0x60C760), "\x56\x8b\xf1\x8b\x4c\x24\x08", 7)) {
+    u32 slot = g_base + VT(StatBar) + 0x68;                     // CStatBar vtable: Show
+    if (*(u32*)slot == g_base + G->frameShow && CodeIs(&G->topRegister)) {
         u32 h = (u32)StatBarShow_hook; WriteMem(slot, &h, 4);
-        static const u32 kCtorCalls[] = { 0x35DFF5, 0x35E07F, 0x35F784, 0x35F811, 0x36904B, 0x3690D2, 0x369493, 0x379AFF };
-        for (size_t i = 0; i < sizeof kCtorCalls / sizeof kCtorCalls[0]; i++) {
-            u32 a = g_base + kCtorCalls[i];
-            if (*(uint8_t*)a != 0xE8 || a + 5 + *(int32_t*)(a + 1) != g_base + 0x359CC0) { logf_("health bar call %06X not recognised", kCtorCalls[i]); continue; }
+        for (size_t i = 0; i < sizeof G->ctorCalls / sizeof G->ctorCalls[0]; i++) {
+            u32 a = g_base + G->ctorCalls[i];
+            if (*(uint8_t*)a != 0xE8 || a + 5 + *(int32_t*)(a + 1) != g_base + G->statBarCtor) { logf_("health bar call %06X not recognised", G->ctorCalls[i]); continue; }
             uint8_t cc[5] = { 0xE8 }; int32_t rr = (int32_t)((u32)StatBarCtor_wrap - (a + 5)); memcpy(cc + 1, &rr, 4);
             WriteMem(a, cc, 5);
         }
@@ -2647,19 +2816,17 @@ static void InstallHealthBarLayer(void)
 static void InstallMovieNative(void)
 {
     if (!g_movieNative) return;
-    static const uint8_t kModeLoop[] = { 0xc7, 0x44, 0x24, 0x44, 0x00, 0x00, 0x5c, 0x00 };
-    static const uint8_t kRestore[] = { 0x33, 0xd2, 0x32, 0xc9, 0xe8, 0xd1, 0xfd, 0xff, 0xff };
-    if (memcmp((void*)(g_base + 0x52B9FF), kModeLoop, sizeof kModeLoop) || memcmp((void*)(g_base + 0x52BB56), kRestore, sizeof kRestore)) {
+    if (!CodeIs(&G->modeLoop) || !CodeIs(&G->modeRestore)) {
         logf_("movies: display mode code not recognised, native mode off"); return;
     }
     // the mode search runs after the current desktop mode has been stored as the movie size: skip the search
     uint8_t j[8] = { 0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90 };
-    int32_t rel = (int32_t)((g_base + 0x52BAD7) - (g_base + 0x52B9FF + 5)); memcpy(j + 1, &rel, 4);
-    WriteMem(g_base + 0x52B9FF, j, sizeof j);
+    int32_t rel = (int32_t)((g_base + G->modeLoopTo) - (g_base + G->modeLoop.rva + 5)); memcpy(j + 1, &rel, 4);
+    WriteMem(g_base + G->modeLoop.rva, j, G->modeLoop.len);
     static const uint8_t nop5[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
-    WriteMem(g_base + 0x52BB5A, nop5, 5);            // ...and nothing to restore afterwards
-    PatchCallGamma(g_base + 0x52C910);                 // movie start: x^(1/2.2) ramp
-    PatchCallGamma(g_base + 0x52B850);                 // movie end: restore of the ramp saved at the start
+    WriteMem(g_base + G->modeRestore.rva + 4, nop5, 5);   // ...and nothing to restore afterwards
+    PatchCallGamma(g_base + G->gammaStart);              // movie start: x^(1/2.2) ramp
+    PatchCallGamma(g_base + G->gammaEnd);                // movie end: restore of the ramp saved at the start
     logf_("movies: native display mode, no gamma change");
 }
 
@@ -2731,13 +2898,19 @@ static BOOL PlayExternal(const char* file)
     if (quit) PostQuitMessage((int)quitCode);
     return TRUE;
 }
-// 0x52C940: play a movie (edx = file, 3 stack arguments, callee cleans) = __fastcall with an unused ecx
-typedef int (__attribute__((fastcall)) *PlayMovie_t)(void*, const char*, const char*, int, int);
-static PlayMovie_t orig_PlayMovie;
-static int __attribute__((fastcall)) PlayMovie_hook(void* c, const char* file, const char* subs, int a, int b)
+// play a movie: edx = file, ecx = window, stack arguments (1.26: 3, 1.27: 5), callee cleans = __fastcall
+typedef int (__attribute__((fastcall)) *PlayMovie_t)(void*, const char*, int, int, int);
+typedef int (__attribute__((fastcall)) *PlayMovie5_t)(void*, const char*, int, int, int, int, int);
+static u32 orig_PlayMovie;
+static int __attribute__((fastcall)) PlayMovie_hook(void* c, const char* file, int a, int b, int d)
 {
     if (g_moviePlayer[0] && file && file[0] && PlayExternal(file)) return 0;
-    return orig_PlayMovie(c, file, subs, a, b);
+    return ((PlayMovie_t)orig_PlayMovie)(c, file, a, b, d);
+}
+static int __attribute__((fastcall)) PlayMovie5_hook(void* c, const char* file, int a, int b, int d, int e, int f)
+{
+    if (g_moviePlayer[0] && file && file[0] && PlayExternal(file)) return 0;
+    return ((PlayMovie5_t)orig_PlayMovie)(c, file, a, b, d, e, f);
 }
 
 static void InstallExternalPlayer(const char* opt)
@@ -2754,13 +2927,14 @@ static void InstallExternalPlayer(const char* opt)
         logf_("movies: external player not found (%s)", g_moviePlayer[0] ? g_moviePlayer : "MPC-HC not installed");
         g_moviePlayer[0] = 0; return;
     }
-    // 0x526F42: call 0x52C940 (play movie)  ->  call PlayMovie_hook
-    u32 at = g_base + 0x526F42;
-    if (*(uint8_t*)at != 0xe8 || at + 5 + *(int32_t*)(at + 1) != g_base + 0x52C940) {
+    // call <play movie>  ->  call PlayMovie_hook
+    u32 at = g_base + G->playCall;
+    if (*(uint8_t*)at != 0xe8 || at + 5 + *(int32_t*)(at + 1) != g_base + G->playFn) {
         logf_("movies: movie code not recognised, external player off"); g_moviePlayer[0] = 0; return;
     }
-    orig_PlayMovie = (PlayMovie_t)(g_base + 0x52C940);
-    uint8_t c[5] = { 0xe8 }; int32_t rel = (int32_t)((u32)PlayMovie_hook - (at + 5)); memcpy(c + 1, &rel, 4);
+    orig_PlayMovie = g_base + G->playFn;
+    u32 hook = G->playArgs == 5 ? (u32)PlayMovie5_hook : (u32)PlayMovie_hook;
+    uint8_t c[5] = { 0xe8 }; int32_t rel = (int32_t)(hook - (at + 5)); memcpy(c + 1, &rel, 4);
     WriteMem(at, c, 5);
     logf_("movies: external player %s", g_moviePlayer);
 }
@@ -2791,9 +2965,9 @@ static int __cdecl ProtectProcess_hook(void)
 
 static void InstallPathQuery(void)
 {
-    if (!g_pathQuery) return;
-    u32 at = g_base + 0x00986C;   // call 0x00BAB0 in GameMain; usually done already (Miles loads the .mix later)
-    if (*(uint8_t*)at == 0xe8 && at + 5 + *(int32_t*)(at + 1) == g_base + 0x00BAB0) {
+    if (!g_pathQuery || !G->protectCall) return;   // (1.27 does not protect the process)
+    u32 at = g_base + G->protectCall;   // call <protect> in GameMain; usually done already (Miles loads the .mix later)
+    if (*(uint8_t*)at == 0xe8 && at + 5 + *(int32_t*)(at + 1) == g_base + G->protectFn) {
         uint8_t c[5] = { 0xe8 }; int32_t rel = (int32_t)((u32)ProtectProcess_hook - (at + 5)); memcpy(c + 1, &rel, 4);
         WriteMem(at, c, 5);
     }
@@ -2806,22 +2980,20 @@ static void InstallPathQuery(void)
 //      changes nothing. FpsLimit=N gives Game.dll a 1 ms GetTickCount (performance counter), keeps the tick gate
 //      on the real counter so the game tick and everything stepped per tick stay exactly as before, and raises
 //      the render flag on its own schedule, 1000/N ms apart. ----
-#define RVA_RenderEvent 0x62D7D0           // 53 57 8d 7e 10: push ebx; push edi; lea edi,[esi+10]
 u32 g_renderTr;
 static LARGE_INTEGER g_lastFrame; static double g_qpcToMs, g_minFrameMs;
 // GetTickCount itself only moves every 15.625 ms on current Windows, timeBeginPeriod or not, so give Game.dll a
 // 1 ms version: the system counter plus the performance counter's progress since we started. Never behind the
 // real counter, never going backwards; other modules keep calling the real one through their own import tables.
-#define IAT_GetTickCount 0x86D230
+static u32 g_gtcSlot;   // Game.dll's import of GetTickCount
 typedef DWORD (WINAPI *GetTickCount_t)(void);
 static GetTickCount_t g_realGTC;
 static DWORD g_tickBase, g_lastHires; static LARGE_INTEGER g_qpcBase;
-#define RVA_TickGateRet 0x62D73A           // return address of the GetTickCount call in the tick gate 0x62D710
 static DWORD WINAPI GetTickCount_hires(void)
 {
     // the tick gate (0x62D710) fires the game tick whenever this value changes: keep it on the real 15.625 ms
     // counter so the tick rate (and everything stepped per tick) stays exactly as in the original game
-    if ((u32)__builtin_return_address(0) - g_base == RVA_TickGateRet) return g_realGTC();
+    if ((u32)__builtin_return_address(0) - g_base == G->tickGateRet) return g_realGTC();
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
     DWORD v = g_tickBase + (DWORD)((double)(c.QuadPart - g_qpcBase.QuadPart) * g_qpcToMs);
     DWORD real = g_realGTC();
@@ -2832,7 +3004,8 @@ static DWORD WINAPI GetTickCount_hires(void)
 }
 static void InstallHiresTicks(void)
 {
-    u32 slot = g_base + IAT_GetTickCount;
+    u32 slot = g_gtcSlot = FindImport("kernel32.dll", "GetTickCount");
+    if (!slot) { logf_("fps limit: GetTickCount import not found"); return; }
     g_realGTC = *(GetTickCount_t*)slot;
     if (!g_realGTC) { logf_("fps limit: GetTickCount import not found"); return; }
     g_tickBase = g_realGTC(); QueryPerformanceCounter(&g_qpcBase); g_lastHires = g_tickBase;
@@ -2842,7 +3015,7 @@ static void InstallHiresTicks(void)
 static void RemoveHiresTicks(void)
 {
     if (!g_realGTC) return;
-    void* r = (void*)g_realGTC; WriteMem(g_base + IAT_GetTickCount, &r, 4); g_realGTC = NULL;
+    void* r = (void*)g_realGTC; WriteMem(g_gtcSlot, &r, 4); g_realGTC = NULL;
 }
 __attribute__((used, cdecl)) void RenderGate(u32 self)
 {
@@ -2864,17 +3037,23 @@ static void __attribute__((naked)) RenderEvent_det(void)
         "pushal\n" "push %%esi\n" "call _RenderGate\n" "add $4, %%esp\n" "popal\n"
         "jmp *_g_renderTr\n" ::: "memory");
 }
+static void __attribute__((naked)) RenderEventEcx_det(void)    // 1.27: thiscall, the frame object in ecx
+{
+    asm volatile(
+        "pushal\n" "push %%ecx\n" "call _RenderGate\n" "add $4, %%esp\n" "popal\n"
+        "jmp *_g_renderTr\n" ::: "memory");
+}
 static void InstallFpsLimit(void)
 {
     if (!g_fpsLimit) return;
-    u32 a = g_base + RVA_RenderEvent;
-    if (memcmp((void*)a, "\x53\x57\x8d\x7e\x10", 5) != 0) { logf_("fps limit: render event code not recognised, off"); return; }
+    u32 a = g_base + G->renderEvent.rva;
+    if (!CodeIs(&G->renderEvent)) { logf_("fps limit: render event code not recognised, off"); return; }
     LARGE_INTEGER f; if (!QueryPerformanceFrequency(&f) || !f.QuadPart) { logf_("fps limit: no performance counter, off"); return; }
     g_qpcToMs = 1000.0 / (double)f.QuadPart;
     g_minFrameMs = 1000.0 / (double)g_fpsLimit;
-    g_renderTr = MakeTrampoline(a, 5);
+    g_renderTr = MakeTrampoline(a, G->renderEvent.len);
     if (!g_renderTr) { logf_("fps limit: trampoline failed, off"); return; }
-    WriteJmp(a, (u32)RenderEvent_det);
+    WriteJmp(a, G->renderSelfEcx ? (u32)RenderEventEcx_det : (u32)RenderEvent_det);
     InstallHiresTicks();
     logf_("fps limit: %d fps (min frame %.3f ms)", g_fpsLimit, g_minFrameMs);
 }
@@ -2888,8 +3067,11 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.9.1  Game.dll build %u", build);
-    if (!g_base || build != 6401) { logf_("unsupported game version, doing nothing (need 1.26a / 6401)"); return; }
+    logf_("W3TrueWidescreen 1.10  Game.dll build %u", build);
+    for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
+    if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401 or 1.27b / 7085)"); return; }
+    logf_("Warcraft III %s", G->name);
+    g_keepVt[0] = VT(SimpleTop); g_keepVt[1] = VT(Cursor);
 
     char src[128];
     double aspect = ReadAspect(src, sizeof src);
@@ -2912,60 +3094,59 @@ static void Install(void)
     if (g_uiScale != 1.0f) logf_("UI scale %.0f%% in game: virtual screen %.4f x %.4f", g_uiScale * 100.0f, 0.6 / g_uiScale * aspect, 0.6 / g_uiScale);
     dlogf_("UI width %.4f, HUD shift %.4f", g_uiW_d, g_e);
 
-    // 1) UI <-> screen conversions use our width
-    u32 pd = (u32)&g_uiW_d;
-    for (size_t i = 0; i < sizeof kDoubleSites / sizeof kDoubleSites[0]; i++) {
-        u32 a = g_base + kDoubleSites[i];
-        u32 cur = *(u32*)a;
-        if (cur != g_base + 0x8768B0) { logf_("site %06X unexpected operand %08X, abort", kDoubleSites[i], cur); return; }
+    // 1) UI <-> screen conversions use our width (1.26: double operands, 1.27: float operands)
+    for (size_t i = 0; i < sizeof G->widthSites / sizeof G->widthSites[0] && G->widthSites[i]; i++) {
+        u32 cur = *(u32*)(g_base + G->widthSites[i]);
+        if (cur != g_base + G->widthConst) { logf_("site %06X unexpected operand %08X, abort", G->widthSites[i], cur); return; }
     }
-    if (*(uint16_t*)(g_base + RVA_OrthoFld) != 0x05D9 || *(u32*)(g_base + RVA_OrthoFld + 2) != g_base + 0x93A8E8) { logf_("ortho site mismatch, abort"); return; }
-    if (memcmp((void*)(g_base + RVA_SetFramePoint), "\x53\x8B\x5C\x24\x08", 5) != 0) { logf_("SetFramePoint prologue mismatch, abort"); return; }
-    if (memcmp((void*)(g_base + RVA_SetAllPoints), "\x56\x57\x8B\xF1\xE8", 5) != 0) { logf_("SetAllPoints prologue mismatch, abort"); return; }
+    if (G->orthoImm ? *(u32*)(g_base + G->orthoW) != G->orthoWConst : *(u32*)(g_base + G->orthoW) != g_base + G->orthoWConst) { logf_("ortho site mismatch, abort"); return; }
+    if (!CodeIs(&G->setFramePoint)) { logf_("SetFramePoint prologue mismatch, abort"); return; }
+    if (!CodeIs(&G->setAllPoints)) { logf_("SetAllPoints prologue mismatch, abort"); return; }
 
-    for (size_t i = 0; i < sizeof kDoubleSites / sizeof kDoubleSites[0]; i++)
-        WriteMem(g_base + kDoubleSites[i], &pd, 4);
+    u32 pw = G->sse ? (u32)&g_uiW_f : (u32)&g_uiW_d;
+    for (size_t i = 0; i < sizeof G->widthSites / sizeof G->widthSites[0] && G->widthSites[i]; i++)
+        WriteMem(g_base + G->widthSites[i], &pw, 4);
     if (g_uiScale != 1.0f) {
-        static const u32 kYSites[] = { 0x4C649A, 0x4C64C9, 0x4C64FA, 0x4C6529, 0x4C6566, 0x4C65A6 };   // double 0.6
-        int ok = *(u32*)(g_base + 0x7AE55A) == g_base + 0x93D84C;                                       // ortho top
-        for (size_t i = 0; i < sizeof kYSites / sizeof kYSites[0]; i++) ok &= *(u32*)(g_base + kYSites[i]) == g_base + 0x93C218;
+        int ok = G->orthoImm ? *(u32*)(g_base + G->orthoH) == G->orthoHConst : *(u32*)(g_base + G->orthoH) == g_base + G->orthoHConst;   // ortho top
+        for (size_t i = 0; i < sizeof G->heightSites / sizeof G->heightSites[0] && G->heightSites[i]; i++)
+            ok &= *(u32*)(g_base + G->heightSites[i]) == g_base + G->heightConst;
         if (ok) {
-            u32 ph = (u32)&g_uiH_d, pf = (u32)&g_uiH_f;
-            for (size_t i = 0; i < sizeof kYSites / sizeof kYSites[0]; i++) WriteMem(g_base + kYSites[i], &ph, 4);
-            WriteMem(g_base + 0x7AE55A, &pf, 4);
+            u32 ph = G->sse ? (u32)&g_uiH_f : (u32)&g_uiH_d, pf = (u32)&g_uiH_f;
+            for (size_t i = 0; i < sizeof G->heightSites / sizeof G->heightSites[0] && G->heightSites[i]; i++) WriteMem(g_base + G->heightSites[i], &ph, 4);
+            if (!G->orthoImm) WriteMem(g_base + G->orthoH, &pf, 4);
         } else { logf_("UI scale: height sites not recognised, scale off"); g_uiScale = 1.0f; }
     }
 
     // 2) UI ortho projection: right edge = our width
-    u32 pf = (u32)&g_uiW_f;
-    WriteMem(g_base + RVA_OrthoFld + 2, &pf, 4);
+    if (G->orthoImm) { g_orthoPatched = 1; SyncImmediates(); }
+    else { u32 pf = (u32)&g_uiW_f; WriteMem(g_base + G->orthoW, &pf, 4); }
     // 2b) map-click gate: let clicks reach the world in the strip beside the top bar (WorldFullHeight)
-    if (*(uint16_t*)(g_base + RVA_PickTopFld) == 0x05D9 && *(u32*)(g_base + RVA_PickTopFld + 2) == g_base + 0x941548) {
+    if (*(u32*)(g_base + G->pickTop) == g_base + G->pickTopConst) {
         g_pickTop = g_worldFull ? 1.0f : 0.577f;
         u32 pp = (u32)&g_pickTop;
-        WriteMem(g_base + RVA_PickTopFld + 2, &pp, 4);
+        WriteMem(g_base + G->pickTop, &pp, 4);
         logf_("map-click gate: top %.3f", g_pickTop);
     } else logf_("map-click gate code not recognised, left as is");
 
     // 3) keep HUD frames in the centered 4:3 area
-    ClearAllPoints = (ClearAllPoints_t)(g_base + RVA_ClearAllPoints);
-    orig_SetFramePoint = (SetFramePoint_t)MakeTrampoline(g_base + RVA_SetFramePoint, 5);
+    ClearAllPoints = (ClearAllPoints_t)(g_base + G->clearAllPoints);
+    orig_SetFramePoint = (SetFramePoint_t)MakeTrampoline(g_base + G->setFramePoint.rva, G->setFramePoint.len);
     if (!orig_SetFramePoint) { logf_("trampoline alloc failed"); return; }
-    WriteJmp(g_base + RVA_SetFramePoint, (u32)SetFramePoint_hook);
-    WriteJmp(g_base + RVA_SetAllPoints, (u32)SetAllPoints_hook);
-    if (memcmp((void*)(g_base + RVA_SetAbsPoint), "\x53\x8B\x5C\x24\x08", 5) == 0) {
-        orig_SetAbsPoint = (SetAbsPoint_t)MakeTrampoline(g_base + RVA_SetAbsPoint, 5);
-        if (orig_SetAbsPoint) WriteJmp(g_base + RVA_SetAbsPoint, (u32)SetAbsPoint_hook);
-    }
+    WriteJmp(g_base + G->setFramePoint.rva, (u32)SetFramePoint_hook);
+    WriteJmp(g_base + G->setAllPoints.rva, (u32)SetAllPoints_hook);
+    if (CodeIs(&G->setAbsPoint)) {
+        orig_SetAbsPoint = (SetAbsPoint_t)MakeTrampoline(g_base + G->setAbsPoint.rva, G->setAbsPoint.len);
+        if (orig_SetAbsPoint) WriteJmp(g_base + G->setAbsPoint.rva, (u32)SetAbsPoint_hook);
+    } else logf_("SetAbsPoint code not recognised");
 
-    if (memcmp((void*)(g_base + RVA_Perspective), "\x51\xD9\x44\x24\x0C", 5) == 0) {
-        orig_Persp = (Persp_t)MakeTrampoline(g_base + RVA_Perspective, 5);
-        if (orig_Persp) WriteJmp(g_base + RVA_Perspective, (u32)Persp_hook);
+    if (CodeIs(&G->persp)) {
+        orig_Persp = (Persp_t)MakeTrampoline(g_base + G->persp.rva, G->persp.len);
+        if (orig_Persp) WriteJmp(g_base + G->persp.rva, (u32)Persp_hook);
         if (!orig_Persp) logf_("perspective hook failed");
     } else logf_("perspective code not recognised, field-of-view fix off");
-    if (memcmp((void*)(g_base + RVA_RenderWorld), "\x53\x56\x8B\xF1\x8B\x8E\x38\x03\x00\x00", 10) == 0) {
-        orig_RenderWorld = (RenderWorld_t)MakeTrampoline(g_base + RVA_RenderWorld, 10);
-        if (orig_RenderWorld) WriteJmp(g_base + RVA_RenderWorld, (u32)RenderWorld_hook);
+    if (CodeIs(&G->renderWorld)) {
+        orig_RenderWorld = (RenderWorld_t)MakeTrampoline(g_base + G->renderWorld.rva, G->renderWorld.len);
+        if (orig_RenderWorld) WriteJmp(g_base + G->renderWorld.rva, (u32)RenderWorld_hook);
     } else logf_("world render code not recognised, console backing off");
     InstallFadeFix();
     InstallHealthBarLayer();

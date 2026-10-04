@@ -1,8 +1,8 @@
-# W3TrueWidescreen: unstretched widescreen for Warcraft III 1.26a
+# W3TrueWidescreen: unstretched widescreen for Warcraft III 1.26a and 1.27b
 
 *[Русская версия](README.ru.md)*
 
-W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Throne, patch **1.26a**) look right on 16:9, 16:10 and ultrawide screens. It keeps the game's original look: nothing is stretched, redrawn or replaced.
+W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Throne, patches **1.26a** and **1.27b**) look right on 16:9, 16:10 and ultrawide screens. It keeps the game's original look: nothing is stretched, redrawn or replaced.
 
 ## What it does
 
@@ -15,15 +15,15 @@ W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Thr
 - **Hero portraits** go to the left screen edge, and the letterbox of in-game cutscenes spans the full width (both optional).
 - **Campaign menu fade** covers the whole screen instead of only its left part.
 - **Above 64 fps.** The engine never draws more than 64 frames per second, whatever the monitor. `FpsLimit` raises that to your monitor's refresh rate (for example 144) without touching the game logic: the simulation, timers and game speed stay exactly as they were. Off by default (`FpsLimit=0`).
-- **DotA Allstars by DracoL1ch.** These maps bring their own interface and their own WideScreen option. The mod lays their interface out over the wide screen as well and shows the world over the full screen height. Tested with DotA Allstars 7.07b1.
+- **DotA Allstars by DracoL1ch.** These maps bring their own interface and their own WideScreen option. The mod lays their interface out over the wide screen as well and shows the world over the full screen height. Tested with DotA Allstars 7.07b1 (1.26a).
 - **Movies at native resolution.** For every movie the game switches the screen to 800×600 and brightens it with a strong gamma ramp, so on a modern display the movies look blurry and washed out. The mod keeps the desktop resolution and colours.
 - **Optional movie renderer** (the `W3TrueWidescreen` folder): the movies are decoded by LAV Filters and drawn by MPC Video Renderer, full screen with clean blacks and, on NVIDIA RTX cards, RTX Video super resolution. The original Blizzard movie files play without installing codecs.
-- **NVIDIA App keeps its settings for the game.** The game locks its process against other programs (an old anti-hack measure), so NVIDIA App cannot tell which game is running and forgets RTX HDR and the game filters. The mod lets other programs read only the path to the game's exe; memory access stays locked. The mod is loaded after NVIDIA App's check at game start, so your saved values no longer reset, but the profile is not applied automatically: select it once in the overlay (Alt+F3) after starting the game. For a complete fix, there is a standalone proxy DLL, [W3_RTX_HDR_Fix](https://github.com/Hr0ffT/W3_RTX_HDR_Fix), which hands NVIDIA App the exe path at an early boot stage, so the correct profile is applied immediately on launch with nothing to click.
+- **NVIDIA App keeps its settings for the game** (1.26a). The game locks its process against other programs (an old anti-hack measure), so NVIDIA App cannot tell which game is running and forgets RTX HDR and the game filters. The mod lets other programs read only the path to the game's exe; memory access stays locked. The mod is loaded after NVIDIA App's check at game start, so your saved values no longer reset, but the profile is not applied automatically: select it once in the overlay (Alt+F3) after starting the game. For a complete fix, there is a standalone proxy DLL, [W3_RTX_HDR_Fix](https://github.com/Hr0ffT/W3_RTX_HDR_Fix), which hands NVIDIA App the exe path at an early boot stage, so the correct profile is applied immediately on launch with nothing to click.
 - Everything happens in memory while the game runs. **No game files are modified.**
 
 ## Requirements
 
-- Warcraft III **1.26a** (Game.dll version 1.26.0.6401). The mod checks the version and does nothing on any other patch.
+- Warcraft III **1.26a** (Game.dll version 1.26.0.6401) or **1.27b** (1.27.1.7085). The mod checks the version and does nothing on any other patch.
 - Direct3D renderer (the default). The mod also works with dgVoodoo2. OpenGL mode (`-opengl`) is not supported: the console backing is skipped there.
 - The optional movie renderer was tested on Windows 11 with an NVIDIA RTX card; RTX super resolution needs an NVIDIA RTX card (the rest works on any modern GPU).
 
@@ -69,7 +69,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 
 `W3TrueWidescreen.log` in the game folder says what the mod did:
 
-- `unsupported game version`: this is not 1.26a.
+- `unsupported game version`: this is neither 1.26a nor 1.27b.
 - `WARNING: window is ...`: the window size does not match the resolution in the settings. Set `Width`/`Height` in the ini.
 - `aspect is 4:3 or narrower`: on a 4:3 screen the interface and view stay as they are; the movie options and `FpsLimit` still work.
 - `movies: ...`: what the movie renderer did. If the movies misbehave, set `MovieRenderer=0` to fall back to the Windows renderer.
@@ -99,6 +99,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.10** — Warcraft III 1.27b support. Fixed: after the first movie, the next movies in the same session were shown by the Windows renderer instead of the movie renderer.
 - **1.9.1** — Fixed a crash when the sound provider is changed in the game's options (e.g. EAX switched on, with DSOAL).
 - **1.9** — `ScoreScreen`: how the score screen fills a wide screen. 3 (new default): the sheet stretched to the width below its header, with the header cells and tabs in place. 2: the sheet extended to both edges, with its border on both sides (1.8.1). 1: original 4:3 with black bars.
 - **1.8.1** — With `LoadingFullScreen=1` the score screen's sheet is extended to the screen edges instead of the bars being covered. With `UIScale` the score screen's parts stay in their places on its background.
