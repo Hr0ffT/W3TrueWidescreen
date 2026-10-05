@@ -99,6 +99,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.10.1** — Fixed the loading screen of melee maps (custom games on maps without their own loading screen): with `UIScale` its picture sat small in the lower left corner, and with `LoadingFullScreen=1` it was not stretched to the screen.
 - **1.10** — Warcraft III 1.27b support. Fixed: after the first movie, the next movies in the same session were shown by the Windows renderer instead of the movie renderer.
 - **1.9.1** — Fixed a crash when the sound provider is changed in the game's options (e.g. EAX switched on, with DSOAL).
 - **1.9** — `ScoreScreen`: how the score screen fills a wide screen. 3 (new default): the sheet stretched to the width below its header, with the header cells and tabs in place. 2: the sheet extended to both edges, with its border on both sides (1.8.1). 1: original 4:3 with black bars.

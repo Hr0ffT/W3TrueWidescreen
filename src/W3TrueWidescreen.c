@@ -2011,8 +2011,10 @@ static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE
     if (g_scoreMode >= 2 && g_aspect > 1.34 && ServeScoreSide(mpq, name, scope, ph)) return 1;
     int dota = g_dotaPending && g_loadModel[0] && SameName(name, g_loadModel);
     int custom = !dota && g_loadModel[0] && SameName(name, g_loadModel);
-    static const char kBg[] = "UI\\Glues\\Loading\\Backgrounds\\", kGen[] = "UI\\Glues\\Loading\\Load-Generic\\";
-    int stock = !_strnicmp(name, kBg, sizeof kBg - 1) || !_strnicmp(name, kGen, sizeof kGen - 1);
+    static const char kBg[] = "UI\\Glues\\Loading\\Backgrounds\\", kGen[] = "UI\\Glues\\Loading\\Load-Generic\\",
+                      kMp[] = "UI\\Glues\\Loading\\Multiplayer\\";       // melee maps: Load-Multiplayer-<race>
+    int stock = !_strnicmp(name, kBg, sizeof kBg - 1) || !_strnicmp(name, kGen, sizeof kGen - 1)
+             || !_strnicmp(name, kMp, sizeof kMp - 1);
     size_t nl = strlen(name);
     if (nl < 4 || (_stricmp(name + nl - 4, ".mdx") && _stricmp(name + nl - 4, ".mdl"))) return 0;
     if (!dota && !custom && !stock) return 0;
@@ -3067,7 +3069,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.10  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.10.1  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401 or 1.27b / 7085)"); return; }
     logf_("Warcraft III %s", G->name);
