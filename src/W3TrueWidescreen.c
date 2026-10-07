@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
+#include <ctype.h>
 #include <stddef.h>
 #define COBJMACROS
 #include <d3d11.h>
@@ -233,7 +234,23 @@ static int IsKeepClass(u32 frame)
 
 // menus: 3D backgrounds (CSpriteFrame) fill the whole screen, the menu panels stay centered
 static int g_menuBgFull = 1;
-static int g_menuEdges = 1;   // MenuLayout=1: menu panels go to the screen edges (only loading screen stays centered)
+static int g_menuEdges = 2;   // MenuLayout: 1 = menu panels at the screen edges, 2 = also widened towards the centre
+static int g_menuWide = 0;    // MenuLayout=2 in effect (wide screen) // MenuLayout=2: how far the left / right panels' inner edges and
+                                                // their contents move towards the centre
+// MenuLayout=2: the screens whose panels are widened (CSkirmish, CLoadSavedGameScreen, CLocalMultiplayerJoin /
+// Create / Load, CCustomCampaignMenu, CViewReplayScreen); frames placed on them move with the panels' inner edges
+static const u32 kWideScreens[][7] = {
+    { 0x965534, 0x964DFC, 0x962A44, 0x962924, 0x962BC8, 0x967A60, 0x965644 },   // 1.26a
+    { 0xAB2058, 0xAB1EF8, 0xAB21B8, 0xAB2318, 0xAB247C, 0xAB1D98, 0xAB1C2C },   // 1.27b
+};
+static float MenuPanelMove(float in, int right);
+static int WideScreen(u32 parent)     // 0: no; 1: skirmish; 2: the others
+{
+    u32 vt = VtRva(parent);
+    const u32* t = kWideScreens[G->build == 6401 ? 0 : 1];
+    for (int i = 0; i < 7; i++) if (vt == t[i]) return i == 0 ? 1 : 2;
+    return 0;
+}
 static int IsKeepClassGlue(u32 frame)
 {
     if (IsKeepClass(frame)) return 1;
@@ -317,6 +334,17 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         if (point == 7 && rel == 7) y += 0.0025f * (k - 1.0f);           // LoadingBarText: on the bar, as the bar moves
         else { x *= k; y *= k; }
         if (point == 6 && rel == 6 && VtRva(frame) == VT(Sprite)) x += 0.4f * (k - 1.0f);   // LoadingBar (model)
+    }
+    int ws;
+    if (g_enabled && g_menuWide && rel <= 8 && (ws = WideScreen(parent)) != 0) {
+        // left column of the screen: towards the centre; right column: towards the centre, except the bottom right
+        // (the button panel there keeps its place)
+        // the same moves as the panels' inner ends (skirmish: 0.5 / 0.499, the others: 0.43 / 0.424 in the models)
+        float nx = rel % 3 == 0 ? x + MenuPanelMove(ws == 1 ? 0.5f : 0.43f, 0)
+                 : (rel % 3 == 2 && rel != 8) ? x - MenuPanelMove(ws == 1 ? 0.499f : 0.424f, 1) : x;
+        if (g_logCount < 400) { g_logCount++; dlogf_("SetPoint SCRN child=%08X(vt %06X) parent vt %06X pt=%u rel=%u x=%.4f -> %.4f y=%.4f",
+            frame, VtRva(frame), VtRva(parent), point, rel, x, nx, y); }
+        x = nx;
     }
     if (g_enabled && g_f != 0.0f && point == 6 && rel == 6 && VtRva(frame) == VT(TimeOfDay)) {
         y += g_f;
@@ -722,7 +750,7 @@ static double ReadAspect(char* src, size_t srcLen)
     double a = atof(v);
     g_glue = GetPrivateProfileIntA(INI_SECTION, "Menus", 1, ini);
     g_menuBgFull = GetPrivateProfileIntA(INI_SECTION, "MenuBackgroundFull", 1, ini);
-    g_menuEdges = GetPrivateProfileIntA(INI_SECTION, "MenuLayout", 1, ini);
+    g_menuEdges = GetPrivateProfileIntA(INI_SECTION, "MenuLayout", 2, ini);
     g_worldFull = GetPrivateProfileIntA(INI_SECTION, "WorldFullHeight", 1, ini);
     g_heroEdge = GetPrivateProfileIntA(INI_SECTION, "HeroBarEdge", 1, ini);
     g_cineFull = GetPrivateProfileIntA(INI_SECTION, "CinematicFullWidth", 1, ini);
@@ -2049,8 +2077,301 @@ static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE
     return r;
 }
 
+// ---- MenuLayout=2: menu panels widened towards the centre ------------------------------------------------------
+// All menu panels are in two models, TopLeftPanel and TopRightPanel (one panel per screen, each moved in by its own
+// root bone). The panels of the two-panel screens are widened so that they meet near the screen centre: everything
+// within MP_CUT of a panel's inner end (rivet strip, corner pieces, chain hooks, plates) moves towards the centre,
+// the rest (up to the screen edge) stays. The frame bars are made of 0.2-wide segments with a strip of rivets
+// textured over each; the segment that crosses the cut gets longer, and its texture is repeated rather than
+// stretched (the metal texture wraps), by a whole number of rivet periods, so the rivets keep their size and spacing.
+// Pivots of the bones go with the vertices, so the chains still swing about their hooks.
+#define MP_MAXNODE 512
+#define MP_CUT 0.21f                // from the inner end: just past the first bar segment, between the chain hooks
+// rivets along the four bar strips of the metal texture (u, from the texture; the same in RoC and TFT)
+static const float kRivets[4][6] = {
+    { 0.175f, 0.350f, 0.517f, 0.720f, 0, 0 },
+    { 0.155f, 0.330f, 0.495f, 0.675f, 0.840f, 0 },
+    { 0.150f, 0.320f, 0.490f, 0.665f, 0.835f, 0.995f },
+    { 0.130f, 0.300f, 0.470f, 0.640f, 0.810f, 0.980f },
+};
+// where to split a bar strip (row 0..3) and how far back the copy starts, to add `ex` (u) of strip without
+// breaking the rivet pattern: whole tiles plus the distance between two rivets; the split lies in the gap after the
+// later rivet. `rev`: the strip runs the other way (u decreasing towards the inner end).
+static void MpSplitPlan(int row, int rev, float ex, float* um, float* k)
+{
+    float r[6]; int n = 0;
+    for (int i = 0; i < 6; i++) if (kRivets[row][i] > 0.0f) r[n++] = kRivets[row][i];
+    if (rev) { for (int i = 0; i < n; i++) r[i] = 1.0f - kRivets[row][n - 1 - i]; }
+    float best = 1e9f; *um = 0.5f; *k = ex;
+    float T0 = floorf(ex);
+    for (int t = 0; t < 2; t++)
+        for (int i = 0; i + 1 < n; i++)
+            for (int j = 0; j <= i; j++) {
+                float kk = T0 + t + (r[i] - r[j]), e = fabsf(kk - ex);
+                if (kk > 0.0f && e < best) { best = e; *k = kk; *um = 0.5f * (r[i] + r[i + 1]); }
+            }
+    if (rev) *um = 1.0f - *um;
+}
+// how far a panel's inner end moves towards the screen centre: so that the two panels meet as on a 4:3 screen (as
+// in the original centred layout), while their outer ends stay at the screen edges
+static float MenuPanelMove(float in, int right)
+{
+    (void)in; (void)right;
+    float m = (float)((0.6 * g_aspect - 0.8) * 0.5);
+    return m > 0.0f ? m : 0.0f;
+}
+// geoset sub-chunks: VRTX, UVBS, first bone, material
+typedef struct { DWORD vrtx, cnt, uvbs, mat; int b0; } MpGeo;
+static void MpParseGeo(const uint8_t* d, DWORD g, DWORD gsz, MpGeo* o)
+{
+    o->vrtx = o->cnt = o->uvbs = 0; o->mat = 0xFFFFFFFF; o->b0 = -1;
+    for (DWORD q = g + 4; q + 8 <= g + gsz; ) {
+        const uint8_t* t = d + q; DWORD k = *(DWORD*)(t + 4);
+        if (!memcmp(t, "VRTX", 4)) { o->vrtx = q; o->cnt = k; q += 8 + k * 12; }
+        else if (!memcmp(t, "NRMS", 4)) q += 8 + k * 12;
+        else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + k * 4;
+        else if (!memcmp(t, "PVTX", 4)) q += 8 + k * 2;
+        else if (!memcmp(t, "GNDX", 4)) q += 8 + k;
+        else if (!memcmp(t, "MATS", 4)) {
+            if (k) o->b0 = (int)*(DWORD*)(t + 8);
+            q += 8 + k * 4; o->mat = *(DWORD*)(d + q); q += 12 + 28;
+            DWORD ne = *(DWORD*)(d + q); q += 4 + ne * 28;
+        }
+        else if (!memcmp(t, "UVAS", 4)) q += 8;
+        else if (!memcmp(t, "UVBS", 4)) { o->uvbs = q; q += 8 + k * 8; }
+        else break;
+    }
+    if (o->uvbs && *(DWORD*)(d + o->uvbs + 4) != o->cnt) o->uvbs = 0;
+}
+// The bar segment crossing the cut is split at its middle: the outer half stays as it is (the geoset itself), the inner
+// half is laid by a copy of the geoset (its other quads collapsed) from the middle to the moved inner end, with the
+// texture repeated: it starts that many rivet periods back, so both the joint in the middle and the inner end, where
+// the next segment begins, keep the original look.
+static uint8_t* AdaptMenuPanels(const uint8_t* src, DWORD n, int right, int* panelsOut, DWORD* outN)
+{
+    *panelsOut = 0;
+    if (n < 16 || memcmp(src, "MDLX", 4)) return NULL;
+    uint8_t* d = (uint8_t*)malloc(n); memcpy(d, src, n);
+    DWORD geos = 0, geosz = 0, geosHdr = 0, bone = 0, bonesz = 0, pivt = 0, pivtsz = 0, mtls = 0, mtlsz = 0, texs = 0, texsz = 0,
+          geoa = 0, geoasz = 0, geoaHdr = 0;
+    for (DWORD p = 4; p + 8 <= n; ) {
+        DWORD sz = *(DWORD*)(d + p + 4);
+        if (p + 8 + sz > n) { free(d); return NULL; }
+        if (!memcmp(d + p, "GEOS", 4)) { geosHdr = p; geos = p + 8; geosz = sz; }
+        else if (!memcmp(d + p, "GEOA", 4)) { geoaHdr = p; geoa = p + 8; geoasz = sz; }
+        else if (!memcmp(d + p, "BONE", 4)) { bone = p + 8; bonesz = sz; }
+        else if (!memcmp(d + p, "PIVT", 4)) { pivt = p + 8; pivtsz = sz; }
+        else if (!memcmp(d + p, "MTLS", 4)) { mtls = p + 8; mtlsz = sz; }
+        else if (!memcmp(d + p, "TEXS", 4)) { texs = p + 8; texsz = sz; }
+        p += 8 + sz;
+    }
+    if (!geos || !bone || (geoa && geoaHdr < geosHdr)) { free(d); return NULL; }
+    // materials whose (first layer's) texture is the wrapping metal bar texture
+    static uint8_t wrapMat[64];
+    memset(wrapMat, 0, sizeof wrapMat);
+    for (DWORD p = mtls, i = 0; mtls && p + 36 <= mtls + mtlsz && i < 64; i++) {
+        DWORD msz = *(DWORD*)(d + p);
+        if (msz < 36 || p + msz > mtls + mtlsz || memcmp(d + p + 12, "LAYS", 4)) break;
+        DWORD tid = *(DWORD*)(d + p + 20 + 12);                   // LAYS, count, layer: size, filter, shading, texture
+        if (texs && (tid + 1) * 268 <= texsz) {
+            char nm[261]; memcpy(nm, d + texs + tid * 268 + 4, 260); nm[260] = 0;
+            for (char* c = nm; *c; c++) *c = (char)tolower((unsigned char)*c);
+            wrapMat[i] = strstr(nm, "metalpieces") != NULL;
+        }
+        p += msz;
+    }
+    static int parent[MP_MAXNODE], root[MP_MAXNODE], named[MP_MAXNODE];
+    static float lo[MP_MAXNODE], hi[MP_MAXNODE], mv[MP_MAXNODE];
+    for (int i = 0; i < MP_MAXNODE; i++) { parent[i] = -1; named[i] = 0; lo[i] = 1e9f; hi[i] = -1e9f; mv[i] = 0.0f; }
+    // the panels of the two-panel screens, by their root bones: skirmish Plane12 / Plane13, game lobby Plane76,
+    // saved games, LAN and custom campaigns Plane117 (+ Plane134 below it on the LAN screen) / Plane103 or Plane107
+    // (the same panel twice). The others (main menu, options, the button panel at the bottom right) keep their shape.
+    static const char* const kWideL[] = { "Plane12", "Plane76", "Plane117", "Plane134" }, * const kWideR[] = { "Plane13", "Plane103", "Plane107" };
+    for (DWORD p = bone; p + 96 <= bone + bonesz; ) {             // BONE: node (inclusive size, name, id, parent, ...) + 8
+        DWORD isz = *(DWORD*)(d + p), id = *(DWORD*)(d + p + 84), par = *(DWORD*)(d + p + 88);
+        if (isz < 96 || p + isz + 8 > bone + bonesz) { free(d); return NULL; }
+        if (id < MP_MAXNODE) {
+            parent[id] = par < MP_MAXNODE ? (int)par : -1;
+            char nm[81]; memcpy(nm, d + p + 4, 80); nm[80] = 0;
+            for (int k = 0; k < (right ? 3 : 4); k++) if (!strcmp(nm, right ? kWideR[k] : kWideL[k])) named[id] = 1;
+        }
+        p += isz + 8;
+    }
+    for (int i = 0; i < MP_MAXNODE; i++) { int r = i, k = 0; while (parent[r] >= 0 && k++ < 64) r = parent[r]; root[i] = r; }
+    for (DWORD g = geos; g + 4 <= geos + geosz; ) {                // extent of every panel
+        DWORD gsz = *(DWORD*)(d + g);
+        if (gsz < 12 || g + gsz > geos + geosz) { free(d); return NULL; }
+        MpGeo G; MpParseGeo(d, g, gsz, &G);
+        if (G.vrtx && G.b0 >= 0 && G.b0 < MP_MAXNODE) {
+            int r = root[G.b0];
+            for (DWORD v = 0; v < G.cnt; v++) {
+                float x = *(float*)(d + G.vrtx + 8 + v * 12);
+                if (x < lo[r]) lo[r] = x;
+                if (x > hi[r]) hi[r] = x;
+            }
+        }
+        g += gsz;
+    }
+    int panels = 0;
+    for (int i = 0; i < MP_MAXNODE; i++)
+        if (root[i] == i && named[i] && hi[i] - lo[i] > 0.3f) {
+            mv[i] = MenuPanelMove(right ? lo[i] : hi[i], right);
+            if (mv[i] > 0.0f) { panels++; dlogf_("menu panel %d: %.3f..%.3f moved %.4f", i, lo[i], hi[i], mv[i]); }
+        }
+    // move the vertices; copies of the geosets with bar segments crossing the cut go to `extra`
+    uint8_t* extra = (uint8_t*)malloc(geosz + 16); DWORD en = 0;
+    static int copyOf[256]; int ncopy = 0, gi = 0;
+    for (DWORD g = geos; g + 4 <= geos + geosz; gi++) {
+        DWORD gsz = *(DWORD*)(d + g);
+        MpGeo G; MpParseGeo(d, g, gsz, &G);
+        int r = (G.vrtx && G.b0 >= 0 && G.b0 < MP_MAXNODE) ? root[G.b0] : -1;
+        if (r < 0 || !(mv[r] > 0.0f) || G.cnt > 256) { g += gsz; continue; }
+        float in = right ? lo[r] : hi[r], m = right ? -mv[r] : mv[r];
+        int wrap = G.uvbs && G.mat < 64 && wrapMat[G.mat] && G.cnt % 4 == 0;
+        static float ox[256]; static uint8_t moved[256], split[256], rigid[256];
+        for (DWORD v = 0; v < G.cnt; v++) {
+            ox[v] = *(float*)(d + G.vrtx + 8 + v * 12);
+            moved[v] = (right ? ox[v] - in : in - ox[v]) < MP_CUT;
+            split[v] = 0; rigid[v] = 0;
+        }
+        // small pieces (chain links, hooks, plates: quads narrower than a bar segment) move or stay as a whole,
+        // by their centre; wide ones (backgrounds, bars) are stretched or split
+        for (DWORD q = 0; G.cnt % 4 == 0 && q < G.cnt; q += 4) {
+            float a = ox[q], b = ox[q];
+            for (int k = 1; k < 4; k++) { if (ox[q + k] < a) a = ox[q + k]; if (ox[q + k] > b) b = ox[q + k]; }
+            if (b - a > 0.15f) continue;
+            float cx = 0.5f * (a + b); int mvq = (right ? cx - in : in - cx) < MP_CUT;
+            for (int k = 0; k < 4; k++) { moved[q + k] = (uint8_t)mvq; rigid[q + k] = 1; }
+        }
+        // bar quads crossing the cut (4 vertices each, two x values, a full strip of the texture)
+        int splits = 0;
+        for (DWORD q = 0; wrap && q < G.cnt; q += 4) {
+            int nm = 0; float umin = 1e9f, umax = -1e9f, vmax = -1e9f;
+            for (int k = 0; k < 4; k++) {
+                const float* uv = (const float*)(d + G.uvbs + 8 + (q + k) * 8);
+                nm += moved[q + k];
+                if (uv[0] < umin) umin = uv[0];
+                if (uv[0] > umax) umax = uv[0];
+                if (uv[1] > vmax) vmax = uv[1];
+            }
+            if (nm == 2 && !rigid[q] && umax - umin > 0.9f && vmax <= 0.51f) { for (int k = 0; k < 4; k++) split[q + k] = 1; splits++; }
+        }
+        uint8_t* c = NULL;
+        if (splits && ncopy < 256 && en + gsz <= geosz + 16) { c = extra + en; memcpy(c, d + g, gsz); }
+        for (DWORD q = 0; q < G.cnt; q += 4) {
+            for (int k = 0; k < 4 && q + k < G.cnt; k++) {
+                DWORD v = q + k;
+                float* x = (float*)(d + G.vrtx + 8 + v * 12);
+                if (!split[v]) {
+                    if (moved[v]) *x = ox[v] + m;
+                    if (c) *(float*)(c + (G.vrtx - g) + 8 + v * 12 + 4) = -100.0f;     // collapsed in the copy
+                    continue;
+                }
+                // the vertex at the other end of the segment, same edge
+                DWORD w = v;
+                for (int j = 0; j < 4; j++) if (moved[q + j] != moved[v] && fabsf(*(float*)(d + G.vrtx + 8 + (q + j) * 12 + 4) - *(float*)(d + G.vrtx + 8 + v * 12 + 4)) < 1e-4f) w = q + j;
+                if (w == v) continue;
+                DWORD vi = moved[v] ? v : w, vo = moved[v] ? w : v;           // inner (moving) / outer end
+                const float* uvI = (const float*)(src + G.uvbs + 8 + vi * 8), * uvO = (const float*)(src + G.uvbs + 8 + vo * 8);
+                float rho = (uvI[0] - uvO[0]) / (ox[vi] - ox[vo]);
+                float ex = fabsf(rho * m);                                     // strip to add (u)
+                int rev = uvI[0] < uvO[0];
+                float vv = uvI[1]; for (int j = 0; j < 4; j++) { float t = *(const float*)(src + G.uvbs + 8 + (q + j) * 8 + 4); if (t < vv) vv = t; }
+                int row = (int)(vv * 8.0f + 0.01f); if (row < 0) row = 0; if (row > 3) row = 3;   // strip of the texture
+                float um, k; MpSplitPlan(row, rev, ex, &um, &k);
+                float xm = ox[vo] + (um - uvO[0]) / (uvI[0] - uvO[0]) * (ox[vi] - ox[vo]);
+                float* uv = (float*)(d + G.uvbs + 8 + v * 8);
+                float* cx = (float*)(c + (G.vrtx - g) + 8 + v * 12);
+                float* cuv = (float*)(c + (G.uvbs - g) + 8 + v * 8);
+                if (moved[v]) {                     // inner end: the original part ends at the split; the copy goes on
+                    *cx = ox[v] + m;                // to the moved inner end with the original texture there
+                    *x = xm; uv[0] = um;
+                } else {                            // outer end: stays in the original; the copy starts at the split,
+                    *cx = xm; cuv[0] = rev ? um + k : um - k;      // that much strip further back
+                }
+            }
+        }
+        if (c) { copyOf[ncopy++] = gi; en += gsz; }
+        g += gsz;
+    }
+    for (DWORD i = 0; pivt && i < pivtsz / 12 && i < MP_MAXNODE; i++) {   // pivots: by object id
+        int r = root[i];
+        if (!(mv[r] > 0.0f)) continue;
+        float* x = (float*)(d + pivt + i * 12);
+        float in = right ? lo[r] : hi[r], u = right ? *x - in : in - *x;
+        if (u < MP_CUT) *x += right ? -mv[r] : mv[r];
+    }
+    // geoset animations of the copies: the same as their originals'
+    uint8_t* ga = (uint8_t*)malloc(geoasz + 16); DWORD gan = 0;
+    for (int j = 0; geoa && j < ncopy; j++)
+        for (DWORD p = geoa; p + 28 <= geoa + geoasz; ) {
+            DWORD isz = *(DWORD*)(d + p);
+            if (isz < 28 || p + isz > geoa + geoasz) break;
+            if (*(DWORD*)(d + p + 24) == (DWORD)copyOf[j] && gan + isz <= geoasz + 16) {
+                memcpy(ga + gan, d + p, isz); *(DWORD*)(ga + gan + 24) = (DWORD)(gi + j); gan += isz;
+                break;
+            }
+            p += isz;
+        }
+    DWORD total = n + en + gan;
+    uint8_t* o = (uint8_t*)malloc(total);
+    DWORD geosEnd = geos + geosz, geoaEnd = geoa ? geoa + geoasz : 0;
+    if (!geoa || geoaHdr < geosHdr) gan = 0, total = n + en;
+    memcpy(o, d, geosEnd); memcpy(o + geosEnd, extra, en);
+    if (gan) {
+        memcpy(o + geosEnd + en, d + geosEnd, geoaEnd - geosEnd);
+        memcpy(o + geoaEnd + en, ga, gan);
+        memcpy(o + geoaEnd + en + gan, d + geoaEnd, n - geoaEnd);
+        *(DWORD*)(o + geoaHdr + en + 4) = geoasz + gan;
+    } else memcpy(o + geosEnd + en, d + geosEnd, n - geosEnd);
+    *(DWORD*)(o + geosHdr + 4) = geosz + en;
+    free(d); free(extra); free(ga);
+    *panelsOut = panels; *outN = total;
+    dlogf_("menu panels: %d bar geosets split", ncopy);
+    return o;
+}
+static int ServeMenuPanels(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
+{
+    if (!g_menuWide) return 0;
+    const char* bn = strrchr(name, '\\'); bn = bn ? bn + 1 : name;
+    int right;
+    if (!_stricmp(bn, "TopLeftPanel.mdx") || !_stricmp(bn, "TopLeftPanel-Expansion.mdx")) right = 0;
+    else if (!_stricmp(bn, "TopRightPanel.mdx") || !_stricmp(bn, "TopRightPanel-Expansion.mdx")) right = 1;
+    else return 0;
+    static const char kSl[] = "UI\\Glues\\SpriteLayers\\";
+    if (_strnicmp(name, kSl, sizeof kSl - 1)) return 0;
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return 0;
+    DWORD n = S_Size(h, NULL), got = 0;
+    uint8_t* buf = (n > 0 && n < (4u << 20)) ? (uint8_t*)malloc(n) : NULL;
+    int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
+    S_Close(h);
+    int panels = 0; DWORD on = 0;
+    uint8_t* o = ok ? AdaptMenuPanels(buf, n, right, &panels, &on) : NULL;
+    free(buf); buf = o; n = on;
+    static char path[MAX_PATH];
+    ok = o && panels > 0;
+    if (ok) {
+        char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
+        char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
+        strcat(dir, "W3TrueWidescreen_cache");
+        CreateDirectoryA(dir, NULL);
+        snprintf(path, sizeof path, "%s\\Menu-%s", dir, bn);
+        FILE* f = fopen(path, "wb");
+        ok = f && fwrite(buf, 1, n, f) == n;
+        if (f) fclose(f);
+    }
+    free(buf);
+    if (!ok) { logf_("menu panels %s not adapted", name); return 0; }
+    BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
+    if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
+    logf_("menu panels %s: %d panels widened (%d)", bn, panels, r);
+    return r;
+}
+
 static BOOL __stdcall SOpenEx_hook(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
+    if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeMenuPanels(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeWidenedLoading(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH)) CheckMapScript(mpq, name, scope);
     if (g_fadeFix && g_fadeState >= 0 && name && ph && !IsBadStringPtrA(name, MAX_PATH) && SameName(name, kFadeName)) {
@@ -3069,7 +3390,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.10.1  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.11  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401 or 1.27b / 7085)"); return; }
     logf_("Warcraft III %s", G->name);
@@ -3157,6 +3478,7 @@ static void Install(void)
     InstallExternalPlayer(g_moviePlayerOpt);
     InstallFpsLimit();
     g_wideD = g_uiW_d; g_wideE = g_e; g_pickTopWide = g_pickTop;
+    if (g_glue && g_menuEdges == 2 && g_aspect > 1.34) g_menuWide = 1;
     g_enabled = 1;
     logf_("active");
 }

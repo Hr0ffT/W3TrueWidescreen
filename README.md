@@ -7,9 +7,9 @@ W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Thr
 ## What it does
 
 - **Unstretched interface.** The in-game console keeps its original proportions and sits in the centre of the screen. The game world fills the full width.
-- **The world fills the whole screen**, including behind the console, the way patch 1.29+ does it. The see-through gaps of the console stay black, as in the original.
+- **The world fills the whole screen**, including behind the console, the way patch 1.32+ does it. The see-through gaps of the console stay black, as in the original.
 - **Original field of view.** On a wide screen the engine zooms in (it derives the field of view from the screen diagonal). The mod restores the 4:3 vertical view, so the extra width just shows more.
-- **Menus.** The 3D backgrounds fill the screen at the original distance. Buttons and the decorative frames, chains and panels go to the screen edges, as they sit on a 4:3 screen. The loading screen stays centred (or fills the screen with `LoadingFullScreen`).
+- **Menus.** The 3D backgrounds fill the screen at the original distance. Buttons and the decorative frames, chains and panels go to the screen edges, as they sit on a 4:3 screen. On the two-panel screens (custom game, LAN, saved games, custom campaigns, replays) the panels are widened towards the centre and meet there as on a 4:3 screen, instead of leaving a wide empty gap; their metal frames get longer, not stretched. The layout can be chosen (`MenuLayout`). The loading screen stays centred (or fills the screen with `LoadingFullScreen`).
 - **Score screen** (`ScoreScreen`). Its parchment sheet reaches the screen edges instead of sitting between black bars: by default the sheet is stretched to the width below its header, with the header cells and tabs left where the texts are; it can also be extended to both edges with its border on both sides, or kept at 4:3. The extra sheet is built from the game's own textures.
 - **Interface size** (`UIScale`, optional). The in-game interface can be made smaller (or larger) in percent: the console, buttons, minimap, portraits and texts shrink together and the world gets more room. Clicks land where they should at any size. Handy on big screens, where the original console takes a third of the height. Menus keep their original size; the loading screen keeps its layout.
 - **Hero portraits** go to the left screen edge, and the letterbox of in-game cutscenes spans the full width (both optional).
@@ -52,7 +52,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `ScoreScreen` | 3 | Score screen background: 1 = original 4:3 with black bars, 2 = sheet extended to both screen edges (border on both sides), 3 = sheet stretched to the width below its header, header and tabs in place |
 | `HeroBarEdge` | 1 | Hero portraits at the left screen edge |
 | `CinematicFullWidth` | 1 | Cutscene letterbox across the full width |
-| `MenuLayout` | 1 | Menu panels at the screen edges (0 = centred 4:3) |
+| `MenuLayout` | 2 | Menu screens: 2 = panels at the screen edges, two-panel screens widened to meet at the centre; 1 = panels at the screen edges as they are; 0 = centred 4:3 |
 | `MovieNativeMode` | 1 | Movies at desktop resolution without the gamma change (0 = original 800×600) |
 | `MovieRenderer` | 1 | Use the movie renderer from the `W3TrueWidescreen` folder if it is there |
 | `MovieSuperRes` | 1 | NVIDIA RTX Video super resolution for the movies |
@@ -99,6 +99,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.11** — Menu screens with two panels (custom game, LAN, saved games, custom campaigns, replays) no longer have a wide empty gap in the middle: the panels are widened towards the centre and meet there as on a 4:3 screen (`MenuLayout=2`, the new default; `MenuLayout=1` keeps the previous layout).
 - **1.10.1** — Fixed the loading screen of melee maps (custom games on maps without their own loading screen): with `UIScale` its picture sat small in the lower left corner, and with `LoadingFullScreen=1` it was not stretched to the screen.
 - **1.10** — Warcraft III 1.27b support. Fixed: after the first movie, the next movies in the same session were shown by the Windows renderer instead of the movie renderer.
 - **1.9.1** — Fixed a crash when the sound provider is changed in the game's options (e.g. EAX switched on, with DSOAL).
