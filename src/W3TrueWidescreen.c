@@ -93,6 +93,7 @@ typedef struct {
     // anti-hack process protection (0: none in this build)
     u32 protectCall, protectFn;
     int dota;                        // DracoL1ch's DotA helpers exist for this build
+    Code worldPick;                  // the world's pick under a UI point (x, y): where clicks reach the world
 } GameAddrs;
 
 static const GameAddrs kGames[] = {
@@ -127,7 +128,8 @@ static const GameAddrs kGames[] = {
     0xACC698, 0xACC69C, 0xACC088, 0xACC6BC, 0xACC6C0, 0xACC6D0,
     { 0x62D7D0, 5, "\x53\x57\x8d\x7e\x10" }, 0, 0x62D73A,
     0x00986C, 0x00BAB0,
-    1 },
+    1,
+    { 0x397900, 6, "\x83\xEC\x1C\xD9\xEE\x56" } },
   { 7085, "1.27b", 1,
     { 0x111600, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" }, { 0x1114B0, 5, "\x55\x8B\xEC\x56\x57" }, { 0x111590, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" },
     0x110A00, 0x1116C0, 0x111520, 0x11DFF0,
@@ -159,7 +161,8 @@ static const GameAddrs kGames[] = {
     0, 0, 0xD53760, 0xD52F1C, 0xD52F20, 0xD52F30,
     { 0x07B780, 5, "\x53\x56\x57\x8b\xf9" }, 1, 0x07B6ED,
     0, 0,
-    0 },
+    0,
+    { 0x3840E0, 6, "\x55\x8B\xEC\x83\xEC\x18" } },
 };
 static const GameAddrs* G;           // the running build
 #define VT(name) (G->vt##name)
@@ -653,6 +656,20 @@ static void DotATopBarFix(void)
             static int n; if (g_debug && n++ < 40) dlogf_("top bar slot %08X moved %.4f -> %.4f", f, x, x + g_e);
         }
     }
+}
+
+// ---- clicks through the console. In the original the world view ends at the console (y 0.13) and under the top
+//      bar (the 0.577 gate below); with WorldFullHeight the world is also behind both, and a click on the console's
+//      or top bar's artwork (not on a button) went to the world under it. Clicks there are dropped again, in the
+//      centred 4:3 area only: beside the console and the top bar the world is visible and takes clicks. ----
+typedef int (__fastcall *WorldPick_t)(u32 ecx, u32 edx, float x, float y, u32 a, u32 b, u32 c);
+static WorldPick_t orig_WorldPick;
+static int __fastcall WorldPick_hook(u32 ecx, u32 edx, float x, float y, u32 a, u32 b, u32 c)
+{
+    if (g_enabled && g_worldFull && g_worldBottomDefault && g_worldTopDefault && !g_dotaRun
+        && x >= g_e && x <= g_e + 0.8f && (y < WORLD_B0 || y >= g_uiH_f - 0.023f))
+        return 0;
+    return orig_WorldPick(ecx, edx, x, y, a, b, c);
 }
 
 static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
@@ -2032,6 +2049,251 @@ static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDL
     logf_("score screen background: %s (%d)", !ext ? "sides covered" : g_scoreMode == 3 ? "sheet stretched" : "sheet extended", r);
     return r;
 }
+// ---- melee loading screen: the minimap frame ----------------------------------------------------------------------
+// The melee loading pictures (UI\Glues\Loading\Multiplayer\) have the frame around the minimap drawn into their top
+// left texture. When the picture is scaled differently from the minimap (LoadingFullScreen=1 stretches it, UIScale
+// scales it but not the minimap), that frame no longer fits the map. The top left quad is cut into pieces: the frame
+// is drawn unscaled around the minimap, and the frame lines of the scaled picture are covered with the parchment on
+// both sides of them, mirrored and crossfaded across the line (geosets of a blended copy of the material, each with
+// its own alpha), so no seams show.
+#define LB_U(c) ((c) * 0.4f / 512.0f)                   // texel column -> model x (the texture spans 0..0.4)
+#define LB_V(r) (0.6f - (r) * 0.4f / 512.0f)            // texel row -> model y (0.6..0.2)
+#define LB_BANDS 8
+typedef struct { float x0, x1, y0, y1; } LbRect;
+typedef struct { float x0, x1, y0, y1, u[4], v[4]; } LbQuad;   // corners: (x0,y1) (x0,y0) (x1,y1) (x1,y0)
+// texel edges: the frame (lines plus one texel), and its four lines with 3 texels on each side
+static const short kLbBox[4] = { 62, 288, 217, 443 };                 // c0 c1 r0 r1
+static const short kLbLine[4][4] = { { 60, 290, 215, 229 }, { 60, 290, 430, 444 }, { 60, 74, 215, 444 }, { 276, 290, 215, 444 } };
+static int LbIn(const LbRect* r, float x, float y) { return x > r->x0 && x < r->x1 && y > r->y0 && y < r->y1; }
+static int LbCutAdd(float* a, int n, float v, float lo, float hi)
+{
+    v = v < lo ? lo : v > hi ? hi : v;
+    for (int i = 0; i < n; i++) if (fabsf(a[i] - v) < 1e-6f) return n;
+    a[n] = v; return n + 1;
+}
+static int LbCmp(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
+static int TexNameIs(const char* s, const char* end)
+{
+    size_t a = strnlen(s, 260), b = strlen(end);
+    return a >= b && !_stricmp(s + a - b, end);
+}
+// one geoset of quads, from the template geoset `t` (sub-chunk offsets `at`), with material `mat`
+static uint8_t* LbGeoset(uint8_t* w, const uint8_t* t, const DWORD* at, const LbQuad* q, int nq, int mat)
+{
+    const int nv = nq * 4;
+    const DWORD matsLen = at[8] - at[7];
+    const DWORD gsz = 4 + (8 + nv * 12) * 2 + 12 + 12 + (8 + nq * 12) + (8 + nv) + 12 + matsLen + 8 + (8 + nv * 8);
+    #define LB_PUT(v) do { DWORD _v = (DWORD)(v); memcpy(w, &_v, 4); w += 4; } while (0)
+    #define LB_PUTF(v) do { float _f = (v); memcpy(w, &_f, 4); w += 4; } while (0)
+    LB_PUT(gsz);
+    memcpy(w, "VRTX", 4); w += 4; LB_PUT(nv);
+    for (int i = 0; i < nq; i++) {
+        const float px[4] = { q[i].x0, q[i].x0, q[i].x1, q[i].x1 }, py[4] = { q[i].y1, q[i].y0, q[i].y1, q[i].y0 };
+        for (int c = 0; c < 4; c++) { LB_PUTF(px[c]); LB_PUTF(py[c]); LB_PUTF(0.0f); }
+    }
+    memcpy(w, "NRMS", 4); w += 4; LB_PUT(nv);
+    for (int i = 0; i < nv; i++) { memcpy(w, t + at[1] + 8, 12); w += 12; }
+    memcpy(w, t + at[2], 12); w += 12;                                  // PTYP: triangles
+    memcpy(w, "PCNT", 4); w += 4; LB_PUT(1); LB_PUT(nq * 6);
+    memcpy(w, "PVTX", 4); w += 4; LB_PUT(nq * 6);
+    for (int i = 0; i < nq; i++) {
+        unsigned short ix[6] = { i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3, i * 4 + 2, i * 4 + 1 };
+        memcpy(w, ix, 12); w += 12;
+    }
+    memcpy(w, "GNDX", 4); w += 4; LB_PUT(nv); memset(w, 0, nv); w += nv;
+    memcpy(w, t + at[6], 12); w += 12;                                  // MTGC
+    memcpy(w, t + at[7], matsLen);                                      // MATS, material, extents
+    *(int*)(w + 8 + *(DWORD*)(t + at[7] + 4) * 4) = mat; w += matsLen;
+    memcpy(w, t + at[8], 8); w += 8;                                    // UVAS
+    memcpy(w, "UVBS", 4); w += 4; LB_PUT(nv);
+    for (int i = 0; i < nq; i++) for (int c = 0; c < 4; c++) {
+        float U = q[i].u[c] / 0.4f, V = (0.6f - q[i].v[c]) / 0.4f;     // (kept inside the texture: no wrap-around)
+        LB_PUTF(U < 0 ? 0 : U > 1 ? 1 : U); LB_PUTF(V < 0 ? 0 : V > 1 ? 1 : V);
+    }
+    #undef LB_PUT
+    #undef LB_PUTF
+    return w;
+}
+// d: the model already scaled by (fx, fy) (StretchMdxVertices with k = fy); returns a new model or NULL
+static uint8_t* FixMeleeLoadingBox(const uint8_t* d, DWORD n, float fx, float fy, DWORD* outN)
+{
+    if (n < 16 || memcmp(d, "MDLX", 4)) return NULL;
+    DWORD p = 4, mtls = 0, mtlsN = 0, texs = 0, texsN = 0, geos = 0, geosN = 0;
+    while (p + 8 <= n) {
+        DWORD sz = *(DWORD*)(d + p + 4);
+        if (p + 8 + sz > n) return NULL;
+        if (!memcmp(d + p, "MTLS", 4)) { mtls = p; mtlsN = sz; }
+        else if (!memcmp(d + p, "TEXS", 4)) { texs = p + 8; texsN = sz; }
+        else if (!memcmp(d + p, "GEOS", 4)) { geos = p; geosN = sz; }
+        else if (!memcmp(d + p, "GEOA", 4)) return NULL;                // (the stock models have none)
+        p += 8 + sz;
+    }
+    if (!mtls || !texs || !geos || geos < mtls) return NULL;
+    // the materials (one layer each) and their textures
+    int matTex[16], nm = 0; DWORD matOff[16];
+    for (DWORD m = mtls + 8; m + 4 <= mtls + 8 + mtlsN; ) {
+        DWORD msz = *(DWORD*)(d + m);
+        if (nm >= 16 || msz < 48 || m + msz > mtls + 8 + mtlsN || memcmp(d + m + 12, "LAYS", 4) || *(DWORD*)(d + m + 16) != 1) return NULL;
+        matOff[nm] = m; matTex[nm++] = *(int*)(d + m + 32);
+        m += msz;
+    }
+    // the geoset textured with Multiplayer\Loading-TopLeft.blp
+    DWORD tg = 0, tgN = 0; int ng = 0, tmat = -1;
+    for (DWORD g = geos + 8; g + 4 <= geos + 8 + geosN; ng++) {
+        DWORD gsz = *(DWORD*)(d + g);
+        if (gsz < 12 || g + gsz > geos + 8 + geosN) return NULL;
+        for (DWORD q = g + 4; !tg && q + 8 <= g + gsz; ) {              // find MATS
+            const uint8_t* t = d + q; DWORD c = *(DWORD*)(t + 4);
+            if (!memcmp(t, "VRTX", 4) || !memcmp(t, "NRMS", 4)) q += 8 + c * 12;
+            else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + c * 4;
+            else if (!memcmp(t, "PVTX", 4)) q += 8 + c * 2;
+            else if (!memcmp(t, "GNDX", 4)) q += 8 + c;
+            else if (!memcmp(t, "MATS", 4)) {
+                int mat = *(int*)(t + 8 + c * 4), tex = mat >= 0 && mat < nm ? matTex[mat] : -1;
+                if (tex >= 0 && (DWORD)(tex + 1) * 268 <= texsN
+                    && TexNameIs((const char*)d + texs + tex * 268 + 4, "Multiplayer\\Loading-TopLeft.blp")) { tg = g; tgN = gsz; tmat = mat; }
+                break;
+            } else break;
+        }
+        g += gsz;
+    }
+    if (!tg) return NULL;
+    // its sub-chunks: VRTX NRMS PTYP PCNT PVTX GNDX MTGC MATS ... UVAS UVBS
+    DWORD at[10] = { 0 }; static const char tags[10][5] = { "VRTX", "NRMS", "PTYP", "PCNT", "PVTX", "GNDX", "MTGC", "MATS", "UVAS", "UVBS" };
+    for (DWORD q = tg + 4, i = 0; i < 10; i++) {
+        if (i == 8) { while (q + 8 <= tg + tgN && memcmp(d + q, "UVAS", 4)) q += 4; }   // past MATS' extents
+        if (q + 8 > tg + tgN || memcmp(d + q, tags[i], 4)) return NULL;
+        at[i] = q;
+        DWORD c = *(DWORD*)(d + q + 4);
+        q += i <= 1 ? 8 + c * 12 : i == 4 ? 8 + c * 2 : i == 5 ? 8 + c : i == 8 ? 8 : i == 9 ? 8 + c * 8 : 8 + c * 4;
+        if (i == 9 && q != tg + tgN) return NULL;
+    }
+    if (*(DWORD*)(d + at[2] + 4) != 1 || *(DWORD*)(d + at[2] + 8) != 4 || *(DWORD*)(d + at[3] + 4) != 1
+        || *(DWORD*)(d + at[6] + 4) != 1) return NULL;
+
+    // the pieces, in model coordinates (the frame's: 0.8 fy x 0.6 fy): x = (u - 0.4) fx + 0.4 fy, y = v fy
+    const float ox = 0.4f * fy;
+    #define LB_SX(u) (((u) - 0.4f) * fx + ox)
+    #define LB_SY(v) ((v) * fy)
+    // the quad's own (scaled) corners, so the pieces meet the neighbouring quads exactly
+    LbRect T = { 1e9f, -1e9f, 1e9f, -1e9f };
+    for (DWORD i = 0, c = *(DWORD*)(d + at[0] + 4); i < c; i++) {
+        const float* v = (const float*)(d + at[0] + 8 + i * 12);
+        T.x0 = fminf(T.x0, v[0]); T.x1 = fmaxf(T.x1, v[0]); T.y0 = fminf(T.y0, v[1]); T.y1 = fmaxf(T.y1, v[1]);
+    }
+    if (fabsf(T.x0 - LB_SX(0.0f)) > 1e-3f || fabsf(T.x1 - LB_SX(0.4f)) > 1e-3f || fabsf(T.y0 - LB_SY(0.2f)) > 1e-3f
+        || fabsf(T.y1 - LB_SY(0.6f)) > 1e-3f) return NULL;
+    // the minimap: LEFT at the frame's LEFT + (0.056875, 0.0425), both scaled with the frame; 0.16 x 0.16
+    const float mx = 0.056875f * fy + 0.08f, my = 0.3f * fy + 0.0425f * fy;
+    const float uc = LB_U(175.0f), vc = LB_V(329.5f);                   // the frame's centre (texels 63..286, 218..440)
+    LbRect O = { mx + LB_U(kLbBox[0]) - uc, mx + LB_U(kLbBox[1]) - uc, my + LB_V(kLbBox[3]) - vc, my + LB_V(kLbBox[2]) - vc };
+    if (O.x0 < T.x0 || O.x1 > T.x1 || O.y0 < T.y0 || O.y1 > T.y1) return NULL;
+    LbRect L[4];
+    for (int i = 0; i < 4; i++)
+        L[i] = (LbRect){ LB_SX(LB_U(kLbLine[i][0])), LB_SX(LB_U(kLbLine[i][1])), LB_SY(LB_V(kLbLine[i][3])), LB_SY(LB_V(kLbLine[i][2])) };
+    float xs[16], ys[16]; int nx = 0, ny = 0;
+    const LbRect* all[6] = { &T, &O, &L[0], &L[1], &L[2], &L[3] };
+    for (int i = 0; i < 6; i++) {
+        nx = LbCutAdd(xs, nx, all[i]->x0, T.x0, T.x1); nx = LbCutAdd(xs, nx, all[i]->x1, T.x0, T.x1);
+        ny = LbCutAdd(ys, ny, all[i]->y0, T.y0, T.y1); ny = LbCutAdd(ys, ny, all[i]->y1, T.y0, T.y1);
+    }
+    qsort(xs, nx, sizeof(float), LbCmp); qsort(ys, ny, sizeof(float), LbCmp);
+    const int nc = (nx - 1) * (ny - 1);
+    LbQuad* base = (LbQuad*)malloc(sizeof(LbQuad) * nc);
+    LbQuad* band = (LbQuad*)malloc(sizeof(LbQuad) * nc * LB_BANDS);
+    int* bandOf = (int*)malloc(sizeof(int) * nc * LB_BANDS);
+    if (!base || !band || !bandOf) { free(base); free(band); free(bandOf); return NULL; }
+    int nb = 0, nO = 0, nL = 0;
+    // texture position of a model point: plain (scaled picture), or mirrored across a line's edge e (texels), or the frame
+    #define LB_TU(x) (((x) - ox) / fx + 0.4f)
+    #define LB_TV(y) ((y) / fy)
+    for (int j = 0, k = 0; j + 1 < ny; j++)
+        for (int i = 0; i + 1 < nx; i++, k++) {
+            LbQuad Q = { xs[i], xs[i + 1], ys[j], ys[j + 1] };
+            const float px[4] = { Q.x0, Q.x0, Q.x1, Q.x1 }, py[4] = { Q.y1, Q.y0, Q.y1, Q.y0 };
+            float cx = (Q.x0 + Q.x1) * 0.5f, cy = (Q.y0 + Q.y1) * 0.5f;
+            int kind = LbIn(&O, cx, cy) ? 4 : -1, corner = 0;           // 4: the frame, 0..3: on a line
+            for (int l = 0; l < 4 && kind < 0; l++) if (LbIn(&L[l], cx, cy)) kind = l;
+            if (kind >= 0 && kind < 2) corner = LbIn(&L[2], cx, cy) || LbIn(&L[3], cx, cy);
+            nO += kind == 4; nL += kind >= 0 && kind < 4;
+            for (int c = 0; c < 4; c++) {
+                float u = LB_TU(px[c]), v = LB_TV(py[c]);
+                if (kind == 4) { u = px[c] - mx + uc; v = py[c] - my + vc; }
+                else if (kind >= 0) {                                   // mirrored from the outer side of the line
+                    float e = kind == 0 ? LB_V(kLbLine[0][2]) : kind == 1 ? LB_V(kLbLine[1][3]) : kind == 2 ? LB_U(kLbLine[2][0]) : LB_U(kLbLine[3][1]);
+                    if (kind < 2) v = 2 * e - v; else u = 2 * e - u;
+                }
+                Q.u[c] = u; Q.v[c] = v;
+            }
+            base[k] = Q;
+            if (kind < 0 || kind > 3 || corner) continue;
+            // mirrored from the inner side, in bands of rising alpha from the outer edge to the inner one
+            const short* ln = kLbLine[kind];
+            float ei = kind == 0 ? LB_V(ln[3]) : kind == 1 ? LB_V(ln[2]) : kind == 2 ? LB_U(ln[1]) : LB_U(ln[0]);
+            float a0 = kind < 2 ? L[kind].y0 : L[kind].x0, a1 = kind < 2 ? L[kind].y1 : L[kind].x1;  // across the line
+            int outerHigh = kind == 0 || kind == 3;                     // the outer edge is at a1 (top line, right line)
+            for (int b = 0; b < LB_BANDS; b++) {
+                float t0 = (float)b / LB_BANDS, t1 = (float)(b + 1) / LB_BANDS;      // from the outer edge
+                float s0 = outerHigh ? a1 - t1 * (a1 - a0) : a0 + t0 * (a1 - a0), s1 = outerHigh ? a1 - t0 * (a1 - a0) : a0 + t1 * (a1 - a0);
+                LbQuad B = Q;
+                if (kind < 2) { B.y0 = Q.y0 > s0 ? Q.y0 : s0; B.y1 = Q.y1 < s1 ? Q.y1 : s1; if (B.y1 <= B.y0) continue; }
+                else { B.x0 = Q.x0 > s0 ? Q.x0 : s0; B.x1 = Q.x1 < s1 ? Q.x1 : s1; if (B.x1 <= B.x0) continue; }
+                const float bx[4] = { B.x0, B.x0, B.x1, B.x1 }, by[4] = { B.y1, B.y0, B.y1, B.y0 };
+                for (int c = 0; c < 4; c++) {
+                    float u = LB_TU(bx[c]), v = LB_TV(by[c]);
+                    if (kind < 2) v = 2 * ei - v; else u = 2 * ei - u;
+                    B.u[c] = u; B.v[c] = v;
+                }
+                bandOf[nb] = b; band[nb++] = B;
+            }
+        }
+    #undef LB_SX
+    #undef LB_SY
+    #undef LB_TU
+    #undef LB_TV
+    // the model: TopLeft replaced by the pieces, a blended copy of its material, the bands (one geoset per alpha)
+    // and their geoset animations (static alpha) after GEOS
+    const DWORD matSz = *(DWORD*)(d + matOff[tmat]);
+    const DWORD cap = n + matSz + (DWORD)(nc + nb) * 200 + LB_BANDS * 600 + 64;
+    uint8_t* o = (uint8_t*)malloc(cap);
+    LbQuad* sel = (LbQuad*)malloc(sizeof(LbQuad) * (nb ? nb : 1));
+    if (!o || !sel) { free(o); free(sel); free(base); free(band); free(bandOf); return NULL; }
+    uint8_t* w = o;
+    DWORD mEnd = mtls + 8 + mtlsN;
+    memcpy(w, d, mEnd); w += mEnd;                                      // ... MTLS
+    memcpy(w, d + matOff[tmat], matSz); *(DWORD*)(w + 24) = 2; w += matSz;   // + the blended material (filter mode 2)
+    *(DWORD*)(o + mtls + 4) = mtlsN + matSz;
+    memcpy(w, d + mEnd, tg - mEnd); w += tg - mEnd;                     // ... GEOS up to TopLeft
+    uint8_t* gs = o + (geos + matSz);
+    w = LbGeoset(w, d, at, base, nc, tmat);
+    memcpy(w, d + tg + tgN, geos + 8 + geosN - tg - tgN); w += geos + 8 + geosN - tg - tgN;
+    int nBandGeo = 0;
+    for (int b = 0; b < LB_BANDS; b++) {
+        int ns = 0;
+        for (int i = 0; i < nb; i++) if (bandOf[i] == b) sel[ns++] = band[i];
+        if (!ns) continue;
+        w = LbGeoset(w, d, at, sel, ns, nm);
+        bandOf[nBandGeo++] = b;                                         // (reused: the band of each new geoset)
+    }
+    *(DWORD*)(gs + 4) = (DWORD)(w - gs - 8);
+    if (nBandGeo) {
+        memcpy(w, "GEOA", 4); *(DWORD*)(w + 4) = nBandGeo * 28; w += 8;
+        for (int i = 0; i < nBandGeo; i++) {
+            float alpha = (bandOf[i] + 0.5f) / LB_BANDS, one = 1.0f;
+            DWORD sz = 28, flags = 0, gid = ng + i;
+            memcpy(w, &sz, 4); memcpy(w + 4, &alpha, 4); memcpy(w + 8, &flags, 4);
+            memcpy(w + 12, &one, 4); memcpy(w + 16, &one, 4); memcpy(w + 20, &one, 4); memcpy(w + 24, &gid, 4);
+            w += 28;
+        }
+    }
+    memcpy(w, d + geos + 8 + geosN, n - (geos + 8 + geosN)); w += n - (geos + 8 + geosN);
+    free(sel); free(base); free(band); free(bandOf);
+    if ((DWORD)(w - o) > cap) { free(o); return NULL; }                 // (can't happen: cap is generous)
+    *outN = (DWORD)(w - o);
+    logf_("melee loading screen: minimap frame unscaled (%d pieces: %d frame, %d on lines; %d bands)", nc, nO, nL, nb);
+    return o;
+}
+
 static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
     if (g_scoreMode >= 2 && g_aspect > 1.34 && SameName(name, "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\ScoreScreen-Background.mdx"))
@@ -2057,6 +2319,10 @@ static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE
     int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
     S_Close(h);
     if (ok) ok = StretchMdxVertices(buf, n, fx, fy, fy) > 0;
+    if (ok && !_strnicmp(name, kMp, sizeof kMp - 1)) {               // melee: the minimap frame around the minimap
+        DWORD on = 0; uint8_t* o = FixMeleeLoadingBox(buf, n, fx, fy, &on);
+        if (o) { free(buf); buf = o; n = on; }
+    }
     static char path[MAX_PATH];
     if (ok) {
         char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
@@ -3390,7 +3656,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.11  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.12  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401 or 1.27b / 7085)"); return; }
     logf_("Warcraft III %s", G->name);
@@ -3467,6 +3733,10 @@ static void Install(void)
         if (orig_Persp) WriteJmp(g_base + G->persp.rva, (u32)Persp_hook);
         if (!orig_Persp) logf_("perspective hook failed");
     } else logf_("perspective code not recognised, field-of-view fix off");
+    if (g_worldFull && CodeIs(&G->worldPick)) {
+        orig_WorldPick = (WorldPick_t)MakeTrampoline(g_base + G->worldPick.rva, G->worldPick.len);
+        if (orig_WorldPick) WriteJmp(g_base + G->worldPick.rva, (u32)WorldPick_hook);
+    } else if (g_worldFull) logf_("world pick code not recognised, clicks on the console reach the world");
     if (CodeIs(&G->renderWorld)) {
         orig_RenderWorld = (RenderWorld_t)MakeTrampoline(g_base + G->renderWorld.rva, G->renderWorld.len);
         if (orig_RenderWorld) WriteJmp(g_base + G->renderWorld.rva, (u32)RenderWorld_hook);

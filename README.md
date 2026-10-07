@@ -99,6 +99,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.12** — Clicks on the console's and top bar's artwork no longer reach the world behind them (with `WorldFullHeight=1` the world is also drawn there, and such a click selected or ordered units under the console); beside the console and the top bar the world still takes clicks. The frame around the minimap on the loading screen of melee maps now fits the map with `LoadingFullScreen=1` and `UIScale` (it was stretched into a rectangle, or larger than the map).
 - **1.11** — Menu screens with two panels (custom game, LAN, saved games, custom campaigns, replays) no longer have a wide empty gap in the middle: the panels are widened towards the centre and meet there as on a 4:3 screen (`MenuLayout=2`, the new default; `MenuLayout=1` keeps the previous layout).
 - **1.10.1** — Fixed the loading screen of melee maps (custom games on maps without their own loading screen): with `UIScale` its picture sat small in the lower left corner, and with `LoadingFullScreen=1` it was not stretched to the screen.
 - **1.10** — Warcraft III 1.27b support. Fixed: after the first movie, the next movies in the same session were shown by the Windows renderer instead of the movie renderer.
