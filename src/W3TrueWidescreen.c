@@ -94,6 +94,7 @@ typedef struct {
     u32 protectCall, protectFn;
     int dota;                        // DracoL1ch's DotA helpers exist for this build
     Code worldPick;                  // the world's pick under a UI point (x, y): where clicks reach the world
+    Code enableSelect;               // CGameUI::EnableSelect(select, selectUI): what the native EnableSelect calls
 } GameAddrs;
 
 static const GameAddrs kGames[] = {
@@ -129,7 +130,8 @@ static const GameAddrs kGames[] = {
     { 0x62D7D0, 5, "\x53\x57\x8d\x7e\x10" }, 0, 0x62D73A,
     0x00986C, 0x00BAB0,
     1,
-    { 0x397900, 6, "\x83\xEC\x1C\xD9\xEE\x56" } },
+    { 0x397900, 6, "\x83\xEC\x1C\xD9\xEE\x56" },
+    { 0x2F9290, 7, "\x8B\x44\x24\x04\x85\xC0\x56" } },
   { 7085, "1.27b", 1,
     { 0x111600, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" }, { 0x1114B0, 5, "\x55\x8B\xEC\x56\x57" }, { 0x111590, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" },
     0x110A00, 0x1116C0, 0x111520, 0x11DFF0,
@@ -162,7 +164,8 @@ static const GameAddrs kGames[] = {
     { 0x07B780, 5, "\x53\x56\x57\x8b\xf9" }, 1, 0x07B6ED,
     0, 0,
     0,
-    { 0x3840E0, 6, "\x55\x8B\xEC\x83\xEC\x18" } },
+    { 0x3840E0, 6, "\x55\x8B\xEC\x83\xEC\x18" },
+    { 0x36C2F0, 9, "\x55\x8B\xEC\x8B\x55\x08\x8B\x45\x0C" } },
 };
 static const GameAddrs* G;           // the running build
 #define VT(name) (G->vt##name)
@@ -237,7 +240,8 @@ static int IsKeepClass(u32 frame)
 
 // menus: 3D backgrounds (CSpriteFrame) fill the whole screen, the menu panels stay centered
 static int g_menuBgFull = 1;
-static int g_menuEdges = 2;   // MenuLayout: 1 = menu panels at the screen edges, 2 = also widened towards the centre
+static int g_menuEdges = 3;   // MenuLayout: 1 = menu panels at the screen edges, 2 = also widened towards the centre,
+                              // 3 = as 2, but the custom game screen's contents stay centred in its panels
 static int g_menuWide = 0;    // MenuLayout=2 in effect (wide screen) // MenuLayout=2: how far the left / right panels' inner edges and
                                                 // their contents move towards the centre
 // MenuLayout=2: the screens whose panels are widened (CSkirmish, CLoadSavedGameScreen, CLocalMultiplayerJoin /
@@ -343,8 +347,11 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         // left column of the screen: towards the centre; right column: towards the centre, except the bottom right
         // (the button panel there keeps its place)
         // the same moves as the panels' inner ends (skirmish: 0.5 / 0.499, the others: 0.43 / 0.424 in the models)
-        float nx = rel % 3 == 0 ? x + MenuPanelMove(ws == 1 ? 0.5f : 0.43f, 0)
-                 : (rel % 3 == 2 && rel != 8) ? x - MenuPanelMove(ws == 1 ? 0.499f : 0.424f, 1) : x;
+        // (MenuLayout=3: on the custom game screen the contents move half as far, so they stay centred in the
+        // widened panels, whose outer edges stay at the screen edges)
+        float h = ws == 1 && g_menuEdges == 3 ? 0.5f : 1.0f;
+        float nx = rel % 3 == 0 ? x + h * MenuPanelMove(ws == 1 ? 0.5f : 0.43f, 0)
+                 : (rel % 3 == 2 && rel != 8) ? x - h * MenuPanelMove(ws == 1 ? 0.499f : 0.424f, 1) : x;
         if (g_logCount < 400) { g_logCount++; dlogf_("SetPoint SCRN child=%08X(vt %06X) parent vt %06X pt=%u rel=%u x=%.4f -> %.4f y=%.4f",
             frame, VtRva(frame), VtRva(parent), point, rel, x, nx, y); }
         x = nx;
@@ -660,23 +667,161 @@ static void DotATopBarFix(void)
 
 // ---- clicks through the console. In the original the world view ends at the console (y 0.13) and under the top
 //      bar (the 0.577 gate below); with WorldFullHeight the world is also behind both, and a click on the console's
-//      or top bar's artwork (not on a button) went to the world under it. Clicks there are dropped again, in the
-//      centred 4:3 area only: beside the console and the top bar the world is visible and takes clicks. ----
+//      or top bar's artwork (not on a button) went to the world under it. Clicks on that artwork are dropped (its
+//      outline, including the raised frames of the minimap and the command card), in the centred 4:3 area only:
+//      beside the console and the top bar the world is visible and takes clicks. ----
+// the console's top edge (UI y, thousandths) over its width in 128 steps of 0.00625: the highest opaque texel of the
+// four races' console textures (ConsoleUI.fdf: bottom tiles 0.176 / 0.15 high); the top bar reaches 0.025 down
+static const uint8_t kConsoleTop[128] = {
+    171, 171, 174, 173, 172, 167, 167, 165, 166, 165, 165, 165, 166, 166, 165, 166,
+    168, 165, 166, 167, 166, 165, 165, 166, 166, 169, 169, 166, 166, 169, 168, 171,
+    165, 163, 160, 159, 147, 141, 140, 140, 140, 140, 140, 141, 142, 150, 143, 147,
+    148, 142, 141, 142, 146, 142, 140, 141, 141, 142, 142, 142, 141, 140, 140, 140,
+    140, 141, 141, 141, 140, 140, 139, 139, 139, 145, 145, 146, 140, 139, 141, 141,
+    142, 142, 147, 142, 142, 145, 148, 148, 145, 146, 149, 151, 170, 167, 172, 167,
+    166, 167, 164, 160, 163, 168, 168, 160, 166, 165, 165, 172, 172, 163, 161, 162,
+    161, 159, 159, 159, 159, 164, 163, 168, 166, 161, 167, 164, 165, 173, 171, 170,
+};
+static int OverConsole(float x, float y)
+{
+    float cx = x - g_e;
+    if (cx < 0.0f || cx > 0.8f) return 0;
+    int i = (int)(cx / 0.00625f); if (i > 127) i = 127;
+    return y < kConsoleTop[i] * 0.001f || y >= g_uiH_f - 0.025f;
+}
 typedef int (__fastcall *WorldPick_t)(u32 ecx, u32 edx, float x, float y, u32 a, u32 b, u32 c);
 static WorldPick_t orig_WorldPick;
 static int __fastcall WorldPick_hook(u32 ecx, u32 edx, float x, float y, u32 a, u32 b, u32 c)
 {
     if (g_enabled && g_worldFull && g_worldBottomDefault && g_worldTopDefault && !g_dotaRun
-        && x >= g_e && x <= g_e + 0.8f && (y < WORLD_B0 || y >= g_uiH_f - 0.023f))
+        && OverConsole(x, y))
         return 0;
     return orig_WorldPick(ecx, edx, x, y, a, b, c);
 }
 
+// ---- HideUIKey: a key that hides the whole interface in a game, for screenshots. Everything the game draws after
+//      the world in a frame is the interface (console, top bar, portraits, minimap, messages, cursor); while hidden,
+//      those draw calls are dropped at the Direct3D device, and the console strips show the world. ----
+static int g_hideKey = 0, g_hideMods = 0;      // virtual key (0: off); 1 Ctrl, 2 Shift, 4 Alt
+static volatile int g_uiHidden = 0, g_afterWorld = 0;
+static int UiHiding(void) { return g_uiHidden && g_afterWorld && GetTickCount() - g_lastWorldTick < 300; }
+typedef HRESULT (__stdcall *Draw4_t)(u32, u32, u32, u32);
+typedef HRESULT (__stdcall *Draw5_t)(u32, u32, u32, u32, u32);
+typedef HRESULT (__stdcall *Draw6_t)(u32, u32, u32, u32, u32, u32);
+typedef HRESULT (__stdcall *Draw7_t)(u32, u32, u32, u32, u32, u32, u32);
+typedef HRESULT (__stdcall *Draw9_t)(u32, u32, u32, u32, u32, u32, u32, u32, u32);
+static Draw4_t o_DP; static Draw5_t o_DPUP; static Draw6_t o_DIP8; static Draw7_t o_DIP9; static Draw9_t o_DIPUP;
+static HRESULT __stdcall h_DP(u32 d, u32 a, u32 b, u32 c) { return UiHiding() ? 0 : o_DP(d, a, b, c); }
+static HRESULT __stdcall h_DPUP(u32 d, u32 a, u32 b, u32 c, u32 e) { return UiHiding() ? 0 : o_DPUP(d, a, b, c, e); }
+static HRESULT __stdcall h_DIP8(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f) { return UiHiding() ? 0 : o_DIP8(d, a, b, c, e, f); }
+static HRESULT __stdcall h_DIP9(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g) { return UiHiding() ? 0 : o_DIP9(d, a, b, c, e, f, g); }
+static HRESULT __stdcall h_DIPUP(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g, u32 h, u32 i)
+    { return UiHiding() ? 0 : o_DIPUP(d, a, b, c, e, f, g, h, i); }
+static void HookSlot(u32* vt, int i, void* fn, void** orig)
+{
+    if (vt[i] == (u32)fn) return;
+    if (!*orig) *orig = (void*)vt[i];
+    else if (vt[i] != (u32)*orig) return;                  // someone else's hook in between: leave it alone
+    WriteMem((u32)&vt[i], &fn, 4);
+}
+static void HideUiInstall(const RenderDev* rd)
+{
+    u32* vt = *(u32**)rd->dev;
+    int d9 = rd->clear == 43;                               // Direct3D 9 (1.27) or 8 (1.26)
+    int dp = d9 ? 81 : 70;                                  // DrawPrimitive, DrawIndexedPrimitive, ...UP, ...IndexedUP
+    if (IsBadReadPtr(vt, (dp + 4) * 4)) return;
+    HookSlot(vt, dp, (void*)h_DP, (void**)&o_DP);
+    if (d9) HookSlot(vt, dp + 1, (void*)h_DIP9, (void**)&o_DIP9); else HookSlot(vt, dp + 1, (void*)h_DIP8, (void**)&o_DIP8);
+    HookSlot(vt, dp + 2, (void*)h_DPUP, (void**)&o_DPUP);
+    HookSlot(vt, dp + 3, (void*)h_DIPUP, (void**)&o_DIPUP);
+}
+// the selection circles are drawn with the world: hide them the way the native EnableSelect(true, false) does
+// (selection itself keeps working); afterwards the selection UI flag gets back the value it had
+static void HideSelectionCircles(int hide)
+{
+    static int applied = 0; static u32 savedUi, appliedTo;
+    typedef void (__fastcall *EnableSelect_t)(u32 ui, u32 edx, u32 sel, u32 selUi);
+    u32 ui = g_gameUI;
+    if (applied && ui != appliedTo) applied = 0;                // a new game
+    if (hide == applied || !ui || IsBadReadPtr((void*)ui, 0x2A8) || *(u32*)ui != g_base + VT(GameUI) || !CodeIs(&G->enableSelect)) return;
+    EnableSelect_t es = (EnableSelect_t)(g_base + G->enableSelect.rva);
+    if (hide) { savedUi = *(u32*)(ui + 0x2A4); es(ui, 0, *(u32*)(ui + 0x2A0), 0); appliedTo = ui; }
+    else es(ui, 0, *(u32*)(ui + 0x2A0), savedUi);
+    applied = hide;
+}
+// the key is taken from the game window's messages, so the game never sees it (Ctrl+H does not also order Hold)
+static WNDPROC g_hideOrigProc; static HWND g_hideWnd; static int g_hideSwallowUp;
+static int HideModsMatch(void)
+{
+    return ((g_hideMods & 1) != 0) == ((GetKeyState(VK_CONTROL) & 0x8000) != 0)
+        && ((g_hideMods & 2) != 0) == ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
+        && ((g_hideMods & 4) != 0) == ((GetKeyState(VK_MENU) & 0x8000) != 0);
+}
+static LRESULT CALLBACK HideUiWndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if ((int)w == g_hideKey) {
+        if ((m == WM_KEYDOWN || m == WM_SYSKEYDOWN) && HideModsMatch()) {
+            if (!(l & (1 << 30)) && GetTickCount() - g_lastWorldTick < 300) {   // in a game; not an auto-repeat
+                g_uiHidden = !g_uiHidden; logf_("interface %s", g_uiHidden ? "hidden" : "shown");
+            }
+            g_hideSwallowUp = 1;
+            return 0;
+        }
+        if ((m == WM_KEYUP || m == WM_SYSKEYUP) && g_hideSwallowUp) { g_hideSwallowUp = 0; return 0; }
+        if ((m == WM_CHAR || m == WM_SYSCHAR) && g_hideSwallowUp) return 0;
+    }
+    return CallWindowProcA(g_hideOrigProc, h, m, w, l);
+}
+static void HideUiPoll(void)
+{
+    if (g_hideWnd && IsWindow(g_hideWnd)) return;
+    HWND h = GetActiveWindow();
+    if (!h) return;
+    g_hideOrigProc = (WNDPROC)SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)HideUiWndProc);
+    if (g_hideOrigProc) { g_hideWnd = h; logf_("HideUIKey: on"); }
+}
+// "F5", "Ctrl+Shift+H", "ScrollLock", ...: virtual key and modifiers; 0 if not understood
+static int ParseKey(const char* s, int* mods)
+{
+    static const struct { const char* n; int vk; } kNames[] = {
+        { "ScrollLock", VK_SCROLL }, { "Pause", VK_PAUSE }, { "Insert", VK_INSERT }, { "Delete", VK_DELETE },
+        { "Home", VK_HOME }, { "End", VK_END }, { "PageUp", VK_PRIOR }, { "PageDown", VK_NEXT },
+        { "Backspace", VK_BACK }, { "Tab", VK_TAB }, { "Space", VK_SPACE }, { "Tilde", VK_OEM_3 }, { "Backquote", VK_OEM_3 },
+    };
+    *mods = 0;
+    char b[64]; snprintf(b, sizeof b, "%s", s);
+    char* t = b;
+    for (;;) {
+        while (*t == ' ') t++;
+        if (!_strnicmp(t, "Ctrl+", 5)) { *mods |= 1; t += 5; }
+        else if (!_strnicmp(t, "Shift+", 6)) { *mods |= 2; t += 6; }
+        else if (!_strnicmp(t, "Alt+", 4)) { *mods |= 4; t += 4; }
+        else break;
+    }
+    char* e = t + strlen(t); while (e > t && (e[-1] == ' ' || e[-1] == '\r' || e[-1] == '\n')) *--e = 0;
+    if (!*t) return 0;
+    if ((t[0] == 'F' || t[0] == 'f') && t[1] >= '1' && t[1] <= '9') { int n = atoi(t + 1); if (n >= 1 && n <= 24) return VK_F1 + n - 1; }
+    if (!t[1] && ((*t >= 'A' && *t <= 'Z') || (*t >= 'a' && *t <= 'z'))) return toupper((unsigned char)*t);
+    if (!t[1] && *t >= '0' && *t <= '9') return *t;
+    for (size_t i = 0; i < sizeof kNames / sizeof kNames[0]; i++) if (!_stricmp(t, kNames[i].n)) return kNames[i].vk;
+    return 0;
+}
+
 static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
 {
+    g_afterWorld = 0;
+    if (g_uiHidden && GetTickCount() - g_lastWorldTick > 2000) g_uiHidden = 0;   // a new game starts with it shown
     g_lastWorldTick = GetTickCount();
     int r = orig_RenderWorld(ecx, edx);
     g_lastWorldTick = GetTickCount();
+    if (g_hideKey) {
+        HideUiPoll();
+        RenderDev hd;
+        if (GetRenderDevice(&hd)) HideUiInstall(&hd);
+        HideSelectionCircles(g_uiHidden);
+        g_afterWorld = 1;                                   // from here to the next frame's world: the interface
+        if (g_uiHidden) return r;                           // (no console backing: the world fills the screen)
+    }
     if (g_enabled && g_dotaRun) DotATopBarFix();
     if (g_debug && g_gameUI && !IsBadReadPtr((void*)g_gameUI, 0x184)) {
         static u32 lastSt = 0xFFFFFFFF; u32 st = *(u32*)(g_gameUI + 0x180);
@@ -767,7 +912,7 @@ static double ReadAspect(char* src, size_t srcLen)
     double a = atof(v);
     g_glue = GetPrivateProfileIntA(INI_SECTION, "Menus", 1, ini);
     g_menuBgFull = GetPrivateProfileIntA(INI_SECTION, "MenuBackgroundFull", 1, ini);
-    g_menuEdges = GetPrivateProfileIntA(INI_SECTION, "MenuLayout", 2, ini);
+    g_menuEdges = GetPrivateProfileIntA(INI_SECTION, "MenuLayout", 3, ini);
     g_worldFull = GetPrivateProfileIntA(INI_SECTION, "WorldFullHeight", 1, ini);
     g_heroEdge = GetPrivateProfileIntA(INI_SECTION, "HeroBarEdge", 1, ini);
     g_cineFull = GetPrivateProfileIntA(INI_SECTION, "CinematicFullWidth", 1, ini);
@@ -778,6 +923,9 @@ static double ReadAspect(char* src, size_t srcLen)
     g_debug = GetPrivateProfileIntA(INI_SECTION, "Debug", 0, ini);
     g_pathQuery = GetPrivateProfileIntA(INI_SECTION, "AllowPathQuery", 1, ini);
     g_fpsLimit = GetPrivateProfileIntA(INI_SECTION, "FpsLimit", 0, ini);
+    { char k[64]; GetPrivateProfileStringA(INI_SECTION, "HideUIKey", "Ctrl+H", k, sizeof k, ini);
+      g_hideKey = k[0] ? ParseKey(k, &g_hideMods) : 0;
+      if (k[0] && !g_hideKey) logf_("HideUIKey=%s not understood, off", k); }
     g_loadFull = GetPrivateProfileIntA(INI_SECTION, "LoadingFullScreen", 0, ini);
     g_scoreMode = GetPrivateProfileIntA(INI_SECTION, "ScoreScreen", 3, ini);
     if (g_scoreMode < 1 || g_scoreMode > 3) g_scoreMode = 3;
@@ -3656,7 +3804,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.12  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.13  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401 or 1.27b / 7085)"); return; }
     logf_("Warcraft III %s", G->name);
@@ -3748,7 +3896,7 @@ static void Install(void)
     InstallExternalPlayer(g_moviePlayerOpt);
     InstallFpsLimit();
     g_wideD = g_uiW_d; g_wideE = g_e; g_pickTopWide = g_pickTop;
-    if (g_glue && g_menuEdges == 2 && g_aspect > 1.34) g_menuWide = 1;
+    if (g_glue && g_menuEdges >= 2 && g_aspect > 1.34) g_menuWide = 1;
     g_enabled = 1;
     logf_("active");
 }
