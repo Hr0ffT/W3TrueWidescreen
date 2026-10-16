@@ -6,7 +6,7 @@
 // area, moves the menus to the screen edges, lets the world fill the whole screen, and restores the
 // original 4:3 vertical field of view for the 3D menus and the game world.
 //
-// Build: i686-w64-mingw32-gcc -O2 -Wall -shared -static-libgcc -s -o W3TrueWidescreen.mix W3TrueWidescreen.c -lversion -lgdi32
+// Build: i686-w64-mingw32-gcc -O2 -Wall -shared -static-libgcc -s -o W3TrueWidescreen.mix W3TrueWidescreen.c -lversion -lgdi32 -ladvapi32
 #include <windows.h>
 #include <aclapi.h>
 #include <stdio.h>
@@ -42,6 +42,7 @@ static float  g_f = 0.0f;
 static double g_aspect = 4.0 / 3.0;
 static int    g_scaleOn = 0, g_scaleGameSeen = 0;
 static u32    g_screenRoot = 0;
+static int    g_narrowOn = 0;   // MenuLayout=0 and the menus are up: interface 0.8 wide (see SetGlueNarrow)
 static int    g_loadFull = 0;   // LoadingFullScreen=1: loading screen pictures stretched over the whole screen
 static int    g_scoreMode = 3;  // ScoreScreen: 1 = 4:3 with black bars, 2 = sheet extended to both edges, 3 = sheet stretched below its header         // vertical shift for top-anchored absolute positions (g_uiH - 0.6)     // FpsLimit: 0 = leave the frame rate alone (see InstallFpsLimit)
 static int    g_pathQuery = 1;    // AllowPathQuery: let other programs read the exe path (see ProtectProcess_hook)
@@ -264,6 +265,7 @@ static int IsKeepClassGlue(u32 frame)
     u32 vt = VtRva(frame);
     if (g_menuBgFull && vt == VT(Sprite)) return 1;               // CSpriteFrame: 3D backgrounds
     // screens drawn as one fixed 4:3 picture stay centred: CLoading (loading screen), CScoreScreen (mission score)
+    // (CBattleNetMain, the Battle.net login, spans the screen: its doors are widened, see ServeBnetDoors)
     if (g_menuEdges && vt != VT(Loading) && vt != VT(Score)) return 1;
     return 0;
 }
@@ -343,6 +345,28 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         if (point == 6 && rel == 6 && VtRva(frame) == VT(Sprite)) x += 0.4f * (k - 1.0f);   // LoadingBar (model)
     }
     int ws;
+    // Battle.net screens (CBattleNetChatPanel spans the screen): the top area (banner, logo, button bar) goes to the
+    // centre; below it the contents move with the widened panels' inner edges (MenuLayout=3: half as far, so they
+    // stay centred in them); the bottom right button panel stays
+    // (chat panel first: the only one with the top area; then standard game, profile, team game, custom game
+    // create / join / load)
+    static const u32 kBnetScreens[2][7] = {
+        { 0x964224, 0x965C00, 0x966A38, 0x965D24, 0x960EB8, 0x9612F0, 0x96153C },
+        { 0xAAC1CC, 0xAAF87C, 0xAAF1BC, 0xAAFE70, 0xAADA34, 0xAAE050, 0xAAE3E4 } };
+    int bs = -1;
+    if (g_enabled && g_menuWide && rel < 8) {
+        u32 pv = VtRva(parent);
+        for (int i = 0; i < 7; i++) if (pv == kBnetScreens[G->build == 6401 ? 0 : 1][i]) bs = i;
+    }
+    if (bs >= 0) {
+        float m = MenuPanelMove(0.5f, 0), h = bs == 0 && y > -0.14f && rel <= 2 ? 1.0f : g_menuEdges == 3 ? 0.5f : 1.0f;
+        // profile: the portrait and the name sit in their own boxes at the top left, which keep their places (only
+        // the name box's right end moves); the home page and the rest below (from y -0.1825) move as elsewhere
+        if (bs == 2 && rel == 0 && y > -0.178f) h = 0.0f;
+        float nx = rel % 3 == 0 ? x + h * m : rel % 3 == 2 ? x - h * m : x;
+        if (g_logCount < 400) { g_logCount++; dlogf_("SetPoint BNET %d child=%08X(vt %06X) pt=%u rel=%u x=%.4f -> %.4f y=%.4f", bs, frame, VtRva(frame), point, rel, x, nx, y); }
+        x = nx;
+    }
     if (g_enabled && g_menuWide && rel <= 8 && (ws = WideScreen(parent)) != 0) {
         // left column of the screen: towards the centre; right column: towards the centre, except the bottom right
         // (the button panel there keeps its place)
@@ -358,6 +382,10 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
     }
     if (g_enabled && g_f != 0.0f && point == 6 && rel == 6 && VtRva(frame) == VT(TimeOfDay)) {
         y += g_f;
+        // the frame sits at the bottom of the screen and its model draws the top bar ornament far above it: with
+        // UIScale over 100 the frame goes below the screen, the game finds it off-screen and does not draw the
+        // model at all. 0x40 in the frame flags: not clipped by the screen (layout part at +0xB4 of the object)
+        if (g_f < 0.0f) *(u32*)(frame - 0xB4 + 0xC) |= 0x40;
         dlogf_("time of day indicator raised by %.4f", g_f);
     }
     if (g_enabled) {
@@ -377,6 +405,15 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
             if (g_logCount < 400) { g_logCount++; dlogf_("SetPoint %s child=%08X(vt %06X) parent vt %06X pt=%u rel=%u x=%.4f -> %.4f y=%.4f%s",
                 isUI ? "UI  " : "GLUE", frame, VtRva(frame), VtRva(parent), point, rel, x, nx, y, keep ? " (full width)" : ""); }
             x = nx;
+        }
+    }
+    // frames placed on the world view's top or bottom edge (the map's multiboard and leaderboard, below the top bar):
+    // the edges moved to the screen edges (WorldFullHeight), keep such frames where they were
+    if (g_enabled && g_worldFull && g_gameUI && !IsBadReadPtr((void*)(g_gameUI + OFS_UI_World), 4)) {
+        u32 w = *(u32*)(g_gameUI + OFS_UI_World);
+        if (w && parent == w + OFS_UI_Frame && frame != parent) {
+            float dy = rel <= 2 && g_worldTopDefault ? WORLD_T0 : rel >= 6 && rel <= 8 && g_worldBottomDefault ? WORLD_B0 : 0.0f;
+            if (dy != 0.0f) { dlogf_("frame %08X (vt %06X) on the world view edge %u: y %.4f -> %.4f", frame, VtRva(frame), rel, y, y + dy); y += dy; }
         }
     }
     orig_SetFramePoint(frame, 0, point, parent, rel, x, y, flag);
@@ -535,6 +572,15 @@ static void __fastcall Persp_hook(u32 out, u32 edx, float fovY, float aspect, fl
     // aspect = viewport width / height; the engine spreads fovY over the view DIAGONAL
     (void)edx;
     MapWidescreenOptionPoll();
+    if (g_fpsLimit) {                                   // once: the display mode the game actually runs in
+        static DWORD t0; static int done;
+        if (!t0) t0 = GetTickCount();
+        else if (!done && GetTickCount() - t0 > 2000) {
+            done = 1; DEVMODEA dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+            if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm))
+                logf_("display: %lux%lu at %lu Hz", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency);
+        }
+    }
     const float W = g_uiW_f;
     const float H1 = 0.6f, H0 = 0.6f - WORLD_B0 + WORLD_T0;      // 0.45: original world view height
     const float Hs = g_uiH_f;                                     // UI screen height (0.6 unless UIScale)
@@ -542,6 +588,11 @@ static void __fastcall Persp_hook(u32 out, u32 edx, float fovY, float aspect, fl
     int isNorm = fabsf(aspect - W / (Hs - WORLD_B0 + WORLD_T0)) < 4e-3f;   // world view between the strips
     int inGame = (GetTickCount() - g_lastWorldTick) < 500;
     if (g_persLog < 30 && (inGame || g_persLog < 3)) { g_persLog++; dlogf_("persp fov=%.4f aspect=%.4f full=%d norm=%d inGame=%d ret=%06X", fovY, aspect, isFull, isNorm, inGame, (u32)__builtin_return_address(0) - g_base); }
+    if (g_enabled && g_narrowOn && !inGame && isFull) {             // MenuLayout=0: stretched menus, unstretched 3D background
+        orig_Persp(out, 0, fovY, 0.8f / H1, zn, zf);
+        float* mm = (float*)out; mm[0] = mm[5] / (float)g_aspect;
+        return;
+    }
     if (!g_enabled || W < 0.8f * Hs / H1 + 1e-3f || (!isFull && !isNorm)) { orig_Persp(out, 0, fovY, aspect, zn, zf); return; }
     int worldDef = g_worldBottomDefault && g_worldTopDefault;
     float* m = (float*)out;
@@ -580,16 +631,52 @@ typedef int (__fastcall *RenderWorld_t)(u32 ecx, u32 edx);
 static RenderWorld_t orig_RenderWorld;
 typedef struct { DWORD X, Y, Width, Height; float MinZ, MaxZ; } VP8;
 typedef struct { LONG x1, y1, x2, y2; } RECT8;
-static int IsD3D8Device(u32* vt)
+// the device must be a Direct3D 8 device (not the OpenGL renderer's object) before its methods are called. Not only
+// Microsoft's d3d8.dll: a wrapper loaded in its place (d3d8to9, dgVoodoo, ReShade, ... as d3d8.dll in the game folder
+// or under another name) implements the same interface. Accepted: the device's methods in the module loaded as
+// d3d8.dll, or in any other module that answers QueryInterface for IDirect3DDevice8 (or exports Direct3DCreate8)
+static const GUID kIID_D3DDevice8 = {0x7385e5df,0x8fe8,0x41d5,{0x86,0xb6,0xd7,0xb4,0x85,0x47,0xb6,0xcf}};
+static int IsD3D8Device(u32 dev)
 {
     static int state = -1;                                       // -1 unknown, 0 no, 1 yes
     if (state >= 0) return state;
     state = 0;
-    HMODULE d3d = GetModuleHandleA("d3d8.dll");
-    MEMORY_BASIC_INFORMATION mi;
-    if (d3d && !IsBadReadPtr(vt, 42 * 4) && VirtualQuery((void*)vt[36], &mi, sizeof mi) && mi.AllocationBase == (void*)d3d)
-        state = 1;
-    if (!state) logf_("renderer is not Direct3D 8, console backing off");
+    u32* vt = *(u32**)dev;
+    HMODULE m = NULL; char mn[MAX_PATH] = "?";
+    if (!IsBadReadPtr(vt, 42 * 4) &&
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[36], &m) && m)
+        GetModuleFileNameA(m, mn, sizeof mn);
+    const char* how = NULL;
+    HMODULE d8 = GetModuleHandleA("d3d8.dll");
+    if (m && m == d8) how = "d3d8.dll";
+    else if (m && m != (HMODULE)g_base && GetProcAddress(m, "Direct3DCreate8")) how = "exports Direct3DCreate8";
+    else if (!IsBadReadPtr(vt, 42 * 4)) {
+        // methods redirected by an overlay or a hook: the rest of the table still in d3d8.dll, or the object
+        // answers QueryInterface for IDirect3DDevice8 (QueryInterface is entry 0 of every COM interface)
+        int ind8 = 0;
+        for (int i = 0; d8 && i < 42; i++) {
+            HMODULE mi = NULL;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[i], &mi) && mi == d8) ind8++;
+        }
+        if (ind8 >= 21) how = "mostly d3d8.dll";
+        else {
+            typedef HRESULT (__stdcall *QI_t)(u32, const GUID*, void**);
+            typedef ULONG (__stdcall *Rel_t)(u32);
+            HMODULE m0 = NULL; u32 q = 0;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[0], &m0) && m0 &&
+                m0 != (HMODULE)g_base && ((QI_t)vt[0])(dev, &kIID_D3DDevice8, (void**)&q) == S_OK && q) {
+                ((Rel_t)(*(u32**)q)[2])(q);
+                how = "IDirect3DDevice8";
+            }
+        }
+    }
+    if (how) { state = 1; logf_("Direct3D 8 device %08X (%s: %s)", dev, mn, how); }
+    else {
+        char m0n[MAX_PATH] = "?"; HMODULE m0 = NULL;
+        if (!IsBadReadPtr(vt, 4) && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[0], &m0) && m0)
+            GetModuleFileNameA(m0, m0n, sizeof m0n);
+        logf_("renderer is not Direct3D 8 (device %08X, methods in %s / %s), console backing off", dev, m0n, mn);
+    }
     return state;
 }
 
@@ -604,7 +691,7 @@ static int GetRenderDevice(RenderDev* d)
     if (G->gxDevice) {
         if (IsBadReadPtr((void*)gx, G->gxDevice + 4)) return 0;
         u32 dev = *(u32*)(gx + G->gxDevice);
-        if (!dev || IsBadReadPtr((void*)dev, 4) || !IsD3D8Device(*(u32**)dev)) return 0;
+        if (!dev || IsBadReadPtr((void*)dev, 4) || !IsD3D8Device(dev)) return 0;
         d->dev = dev; d->clear = 36; d->setVp = 40; d->getVp = 41;
         d->W = *(int*)(gx + G->gxWidth); d->H = *(int*)(gx + G->gxWidth + 4);
         return d->W > 0 && d->H > 0;
@@ -1153,6 +1240,28 @@ static void SetUIScaleActive(int on)
     }
 
 }
+// MenuLayout=0: the menus as in the original game, stretched over the wide screen. While the menus are up the
+// interface is 0.8 wide again (screen frame, projection, mouse), nothing is moved or replaced; the loading screen
+// switches to the wide interface, the menus after a game switch back.
+static int g_narrowWant, g_narrowGameSeen; static u32 g_narrowRoot;
+static void NarrowRootSize(void)
+{
+    u32 r = g_screenRoot;
+    if (!r || IsBadReadPtr((void*)r, 0x60)) return;
+    g_narrowRoot = r;
+    typedef void (__fastcall *SetSize_t)(u32 self, u32 edx, float v);
+    ((SetSize_t)(g_base + G->setWidth))(r, 0, g_uiW_f);
+}
+static void SetGlueNarrow(int on)
+{
+    if (!g_narrowWant || on == g_narrowOn || (on && g_dotaMode)) return;
+    g_narrowOn = on;
+    if (on) { g_uiW_d = 0.8; g_uiW_f = 0.8f; g_e = 0.0f; }
+    else { g_uiW_d = g_uiH_d * g_aspect; g_uiW_f = (float)g_uiW_d; g_e = (float)((g_uiW_d - 0.8) * 0.5); }
+    SyncImmediates();
+    NarrowRootSize();
+    logf_("menus %s: screen %.4f x %.4f", on ? "as in the original (stretched)" : "left, wide interface", g_uiW_d, g_uiH_d);
+}
 static void DotAModeCheckExit(u32 parent)
 {
     if (IsGameUIRoot(parent)) { g_dotaGameSeen = 1; return; }
@@ -1174,6 +1283,7 @@ static void DotAFrameEvent(u32 frame, u32 parent)
     u32 vt = VtRva(frame);
     if (vt == VT(Loading) || VtRva(parent) == VT(Loading)) {               // CLoading (or a frame placed on it)
         if (!g_loadingActive) logf_("loading screen (DotA map selected: %d)", g_dotaPending);
+        SetGlueNarrow(0);
         if (!g_scaleOn && !(g_dotaPending && g_dotaOrig)) SetUIScaleActive(1);
         g_loadingActive = 1; g_dotaLoading = g_dotaPending;
     } else if (vt == VT(Score)) {                                     // CScoreScreen
@@ -1198,6 +1308,14 @@ static void DotAFrameEvent(u32 frame, u32 parent)
         g_loadingActive = 0; g_dotaLoading = 0;
     }
     if (g_dotaMode || g_dotaRun) DotAModeCheckExit(parent);
+    if (g_narrowWant) {
+        if (g_narrowOn) { if (IsScreenRoot(parent) && parent != g_narrowRoot) NarrowRootSize(); }   // (a new screen frame)
+        else if (IsGameUIRoot(parent)) g_narrowGameSeen = 1;
+        else if (g_narrowGameSeen && !g_loadingActive && vt != VT(Score) && VtRva(parent) != VT(Score) && IsScreenRoot(parent)) {
+            u32 ui = g_gameUI;
+            if (!(ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + VT(GameUI))) { g_narrowGameSeen = 0; SetGlueNarrow(1); }
+        }
+    }
 }
 static char g_loadModel[MAX_PATH];        // custom loading screen model of the selected DotA map (from war3map.w3i)
 static void ReadLoadingModel(HANDLE mpq, const char* scriptName, DWORD scope)
@@ -1207,7 +1325,8 @@ static void ReadLoadingModel(HANDLE mpq, const char* scriptName, DWORD scope)
     strcpy(b, "war3map.w3i");
     g_loadModel[0] = 0;
     HANDLE h = 0;
-    if (!orig_SOpenEx(mpq, w3i, scope, &h) || !h) return;
+    // war3map.w3i is at the map's root; the script may be there or in Scripts\ (DotA 6.8x)
+    if ((!orig_SOpenEx(mpq, w3i, scope, &h) || !h) && (h = 0, !orig_SOpenEx(mpq, "war3map.w3i", scope, &h) || !h)) return;
     DWORD n = S_Size(h, NULL), got = 0;
     char* buf = (n > 0 && n < (1u << 20)) ? (char*)malloc(n + 1) : NULL;
     if (buf && S_Read(h, buf, n, &got, NULL) && got == n) {
@@ -2590,7 +2709,7 @@ static uint8_t* AdaptMenuPanels(const uint8_t* src, DWORD n, int right, int* pan
         if (texs && (tid + 1) * 268 <= texsz) {
             char nm[261]; memcpy(nm, d + texs + tid * 268 + 4, 260); nm[260] = 0;
             for (char* c = nm; *c; c++) *c = (char)tolower((unsigned char)*c);
-            wrapMat[i] = strstr(nm, "metalpieces") != NULL;
+            wrapMat[i] = strstr(nm, "metalpieces") != NULL ? 1 : strstr(nm, "bnetchannel") != NULL ? 2 : 0;
         }
         p += msz;
     }
@@ -2600,14 +2719,20 @@ static uint8_t* AdaptMenuPanels(const uint8_t* src, DWORD n, int right, int* pan
     // the panels of the two-panel screens, by their root bones: skirmish Plane12 / Plane13, game lobby Plane76,
     // saved games, LAN and custom campaigns Plane117 (+ Plane134 below it on the LAN screen) / Plane103 or Plane107
     // (the same panel twice). The others (main menu, options, the button panel at the bottom right) keep their shape.
-    static const char* const kWideL[] = { "Plane12", "Plane76", "Plane117", "Plane134" }, * const kWideR[] = { "Plane13", "Plane103", "Plane107" };
+    // Battle.net: welcome and chat room Plane35 / Plane58 (welcome) or Plane33 (chat room), channels Plane132
+    // standard game Plane122, profile Plane142 / Plane148, team game Plane164 / Plane166 (left; Plane107 right)
+    static const char* const kWideL[] = { "Plane12", "Plane76", "Plane117", "Plane134", "Plane35", "Plane132", "Plane122",
+                                          "Plane142", "Plane148", "Plane164", "Plane166" },
+                     * const kWideR[] = { "Plane13", "Plane103", "Plane107", "Plane58", "Plane33" };
+    static int planeOf33 = -1; planeOf33 = -1;
     for (DWORD p = bone; p + 96 <= bone + bonesz; ) {             // BONE: node (inclusive size, name, id, parent, ...) + 8
         DWORD isz = *(DWORD*)(d + p), id = *(DWORD*)(d + p + 84), par = *(DWORD*)(d + p + 88);
         if (isz < 96 || p + isz + 8 > bone + bonesz) { free(d); return NULL; }
         if (id < MP_MAXNODE) {
             parent[id] = par < MP_MAXNODE ? (int)par : -1;
             char nm[81]; memcpy(nm, d + p + 4, 80); nm[80] = 0;
-            for (int k = 0; k < (right ? 3 : 4); k++) if (!strcmp(nm, right ? kWideR[k] : kWideL[k])) named[id] = 1;
+            for (int k = 0; k < (right ? 5 : 11); k++) if (!strcmp(nm, right ? kWideR[k] : kWideL[k])) named[id] = 1;
+            if (right && !strcmp(nm, "Plane33")) planeOf33 = (int)id;
         }
         p += isz + 8;
     }
@@ -2641,7 +2766,8 @@ static uint8_t* AdaptMenuPanels(const uint8_t* src, DWORD n, int right, int* pan
         int r = (G.vrtx && G.b0 >= 0 && G.b0 < MP_MAXNODE) ? root[G.b0] : -1;
         if (r < 0 || !(mv[r] > 0.0f) || G.cnt > 256) { g += gsz; continue; }
         float in = right ? lo[r] : hi[r], m = right ? -mv[r] : mv[r];
-        int wrap = G.uvbs && G.mat < 64 && wrapMat[G.mat] && G.cnt % 4 == 0;
+        int wrap = G.uvbs && G.mat < 64 && wrapMat[G.mat] == 1 && G.cnt % 4 == 0;
+        int tiles = G.uvbs && G.mat < 64 && wrapMat[G.mat] == 2 && G.cnt % 4 == 0;   // Battle.net channel box rails
         static float ox[256]; static uint8_t moved[256], split[256], rigid[256];
         for (DWORD v = 0; v < G.cnt; v++) {
             ox[v] = *(float*)(d + G.vrtx + 8 + v * 12);
@@ -2656,6 +2782,13 @@ static uint8_t* AdaptMenuPanels(const uint8_t* src, DWORD n, int right, int* pan
             if (b - a > 0.15f) continue;
             float cx = 0.5f * (a + b); int mvq = (right ? cx - in : in - cx) < MP_CUT;
             for (int k = 0; k < 4; k++) { moved[q + k] = (uint8_t)mvq; rigid[q + k] = 1; }
+        }
+        // the chat room's right panel (Plane33) holds the exit button's panel at its foot (quads centred below 0.676;
+        // the upper panel's lowest bar is centred at 0.684): that part keeps its shape and place
+        for (DWORD q = 0; r == planeOf33 && G.cnt % 4 == 0 && q < G.cnt; q += 4) {
+            float cy = 0.0f;
+            for (int k = 0; k < 4; k++) cy += 0.25f * *(float*)(d + G.vrtx + 8 + (q + k) * 12 + 4);
+            if (cy < 0.676f) for (int k = 0; k < 4; k++) moved[q + k] = 0;
         }
         // bar quads crossing the cut (4 vertices each, two x values, a full strip of the texture)
         int splits = 0;
@@ -2705,7 +2838,164 @@ static uint8_t* AdaptMenuPanels(const uint8_t* src, DWORD n, int right, int* pan
                 }
             }
         }
-        if (c) { copyOf[ncopy++] = gi; en += gsz; }
+        // a stretched quad of a repeating texture (u over more than one tile: the profile's name box) keeps its texel
+        // size: the moved end's u goes on further
+        for (DWORD q = 0; !wrap && !tiles && G.uvbs && G.cnt % 4 == 0 && q < G.cnt; q += 4) {
+            int nm = 0; float ua = 1e9f, ub = -1e9f, xa = 1e9f, xb = -1e9f;
+            for (int k = 0; k < 4; k++) {
+                const float* uv = (const float*)(src + G.uvbs + 8 + (q + k) * 8);
+                nm += moved[q + k]; ua = fminf(ua, uv[0]); ub = fmaxf(ub, uv[0]); xa = fminf(xa, ox[q + k]); xb = fmaxf(xb, ox[q + k]);
+            }
+            if (nm != 2 || rigid[q] || ub - ua < 1.5f || xb - xa < 1e-4f) continue;
+            float rho = (ub - ua) / (xb - xa);
+            for (int k = 0; k < 4; k++) {
+                if (!moved[q + k]) continue;
+                float* uv = (float*)(d + G.uvbs + 8 + (q + k) * 8);
+                // u grows towards the end with the larger u: away from the kept end
+                float uk = 0; for (int j = 0; j < 4; j++) if (!moved[q + j]) uk = ((const float*)(src + G.uvbs + 8 + (q + j) * 8))[0];
+                uv[0] = uk + (uv[0] - uk) * (1.0f + fabsf(m) * rho / (ub - ua));
+            }
+        }
+        // Battle.net channel box: its rails are rows of equal tile quads, each moved or kept as a whole; the gap
+        // between the kept and the moved tiles of a row is filled with copies of the last kept tile (in a copy of
+        // the geoset, the last one cut to fit)
+        if (tiles && !c && ncopy < 256 && en + gsz <= geosz + 16) {
+            int nq = (int)G.cnt / 4, slot = 0;
+            // clean quads: four consecutive vertices, a rectangle, whose triangles use only them
+            static uint8_t clean[64];
+            const uint16_t* tri = NULL; DWORD ntri = 0;
+            for (DWORD q = g + 4; q + 8 <= g + gsz; ) {
+                const uint8_t* t = d + q; DWORD k = *(DWORD*)(t + 4);
+                if (!memcmp(t, "PVTX", 4)) { tri = (const uint16_t*)(t + 8); ntri = k; break; }
+                q += 8 + (!memcmp(t, "VRTX", 4) || !memcmp(t, "NRMS", 4) ? k * 12 : !memcmp(t, "GNDX", 4) ? k : k * 4);
+            }
+            for (int a = 0; a < nq && a < 64; a++) {
+                float xs[4], ys[4]; int nxv = 0, nyv = 0;
+                for (int k = 0; k < 4; k++) {
+                    float vx = ox[a * 4 + k], vy = *(float*)(d + G.vrtx + 8 + (a * 4 + k) * 12 + 4); int seen;
+                    seen = 0; for (int j = 0; j < nxv; j++) if (fabsf(xs[j] - vx) < 1e-5f) seen = 1; if (!seen) xs[nxv++] = vx;
+                    seen = 0; for (int j = 0; j < nyv; j++) if (fabsf(ys[j] - vy) < 1e-5f) seen = 1; if (!seen) ys[nyv++] = vy;
+                }
+                clean[a] = nxv == 2 && nyv == 2 && tri;
+            }
+            for (DWORD t = 0; tri && t + 2 < ntri; t += 3) {
+                int q0 = tri[t] / 4, q1 = tri[t + 1] / 4, q2 = tri[t + 2] / 4;
+                if (q0 != q1 || q0 != q2) { if (q0 < 64) clean[q0] = 0; if (q1 < 64) clean[q1] = 0; if (q2 < 64) clean[q2] = 0; }
+            }
+            uint8_t* cc = extra + en; memcpy(cc, d + g, gsz);
+            for (DWORD v = 0; v < G.cnt; v++) *(float*)(cc + (G.vrtx - g) + 8 + v * 12 + 4) = -100.0f;
+            for (int a = 0; a < nq; a++) {                          // a: a kept tile next to the gap
+                if (moved[a * 4] || a >= 64 || !clean[a]) continue;
+                float ax0 = 1e9f, ax1 = -1e9f, ay0 = 1e9f, ay1 = -1e9f;
+                for (int k = 0; k < 4; k++) { float vx = ox[a * 4 + k], vy = *(float*)(d + G.vrtx + 8 + (a * 4 + k) * 12 + 4);
+                    ax0 = fminf(ax0, vx); ax1 = fmaxf(ax1, vx); ay0 = fminf(ay0, vy); ay1 = fmaxf(ay1, vy); }
+                // the nearest moved tile of the same row, on the inner side
+                float gEnd = right ? -1e9f : 1e9f; int found = 0;
+                for (int b = 0; b < nq; b++) {
+                    if (!moved[b * 4]) continue;
+                    float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f;
+                    for (int k = 0; k < 4; k++) { float vx = *(float*)(d + G.vrtx + 8 + (b * 4 + k) * 12); bx0 = fminf(bx0, vx); bx1 = fmaxf(bx1, vx);
+                        by0 = fminf(by0, *(float*)(d + G.vrtx + 8 + (b * 4 + k) * 12 + 4)); }
+                    if (fabsf(by0 - ay0) > 1e-4f) continue;
+                    if (!right && bx0 > ax1 - 1e-4f && bx0 < gEnd) { gEnd = bx0; found = 1; }
+                    if (right && bx1 < ax0 + 1e-4f && bx1 > gEnd) { gEnd = bx1; found = 1; }
+                }
+                if (!found) continue;
+                // the kept tile must be the last kept one before the gap
+                int last = 1;
+                for (int b = 0; b < nq && last; b++) {
+                    if (moved[b * 4] || b == a) continue;
+                    float bx0 = 1e9f, by0 = 1e9f;
+                    for (int k = 0; k < 4; k++) { bx0 = fminf(bx0, ox[b * 4 + k]); by0 = fminf(by0, *(float*)(d + G.vrtx + 8 + (b * 4 + k) * 12 + 4)); }
+                    if (fabsf(by0 - ay0) < 1e-4f && (right ? bx0 < ax0 - 1e-4f && bx0 > gEnd - 1e-4f : bx0 > ax0 + 1e-4f && bx0 < gEnd)) last = 0;
+                }
+                if (!last) continue;
+                float w = ax1 - ax0;
+                for (float s0 = right ? ax0 - w : ax1; right ? s0 + w > gEnd + 1e-5f : s0 < gEnd - 1e-5f; s0 += right ? -w : w) {
+                    while (slot < nq && (slot >= 64 || !clean[slot])) slot++;
+                    if (slot >= nq) break;
+                    float x0 = s0, x1 = s0 + w, f0 = 0.0f, f1 = 1.0f;      // f: part of the tile shown
+                    if (!right && x1 > gEnd) { f1 = (gEnd - x0) / w; x1 = gEnd; }
+                    if (right && x0 < gEnd) { f0 = (gEnd - x0) / w; x0 = gEnd; }
+                    float sx0 = 1e9f, sy0 = 1e9f;                      // the slot quad's own corners give each vertex its role
+                    for (int k = 0; k < 4; k++) { sx0 = fminf(sx0, ox[slot * 4 + k]); sy0 = fminf(sy0, *(float*)(d + G.vrtx + 8 + (slot * 4 + k) * 12 + 4)); }
+                    for (int k = 0; k < 4; k++) {
+                        DWORD dv = slot * 4 + k, sv = a * 4;
+                        int dl = fabsf(ox[dv] - sx0) < 1e-5f, db = fabsf(*(float*)(d + G.vrtx + 8 + dv * 12 + 4) - sy0) < 1e-5f;
+                        for (int j = 0; j < 4; j++) {
+                            int sl = fabsf(ox[a * 4 + j] - ax0) < 1e-5f, sb = fabsf(*(float*)(d + G.vrtx + 8 + (a * 4 + j) * 12 + 4) - ay0) < 1e-5f;
+                            if (sl == dl && sb == db) sv = a * 4 + j;
+                        }
+                        const float* suv = (const float*)(src + G.uvbs + 8 + sv * 8);
+                        float t = (ox[sv] - ax0) / w, u0 = 0, u1 = 0;     // u at the tile's two ends
+                        for (int j = 0; j < 4; j++) { const float* q2 = (const float*)(src + G.uvbs + 8 + (a * 4 + j) * 8);
+                            if (fabsf(ox[a * 4 + j] - ax0) < 1e-5f) u0 = q2[0]; else u1 = q2[0]; }
+                        float ft = t < 0.5f ? f0 : f1;
+                        *(float*)(cc + (G.vrtx - g) + 8 + dv * 12) = t < 0.5f ? x0 : x1;
+                        *(float*)(cc + (G.vrtx - g) + 8 + dv * 12 + 4) = *(float*)(d + G.vrtx + 8 + sv * 12 + 4);
+                        *(float*)(cc + (G.vrtx - g) + 8 + dv * 12 + 8) = *(float*)(d + G.vrtx + 8 + sv * 12 + 8);
+                        *(float*)(cc + (G.uvbs - g) + 8 + dv * 8) = u0 + (u1 - u0) * ft;
+                        *(float*)(cc + (G.uvbs - g) + 8 + dv * 8 + 4) = suv[1];
+                    }
+                    slot++;
+                }
+            }
+            // a row whose last kept tile before the gap is not a plain tile (a joint, as in the profile's name box):
+            // the gap is filled with copies of the first moved tile instead, outwards from it
+            for (int b = 0; b < nq && b < 64; b++) {
+                if (!moved[b * 4] || !clean[b]) continue;
+                float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f, by1 = -1e9f;
+                for (int k = 0; k < 4; k++) { float vx = ox[b * 4 + k], vy = *(float*)(d + G.vrtx + 8 + (b * 4 + k) * 12 + 4);
+                    bx0 = fminf(bx0, vx); bx1 = fmaxf(bx1, vx); by0 = fminf(by0, vy); by1 = fmaxf(by1, vy); }
+                int first = 1, ka = -1; float kx = right ? 1e9f : -1e9f;
+                for (int a = 0; a < nq; a++) {
+                    if (a == b) continue;
+                    float ax0 = 1e9f, ax1 = -1e9f, ay0 = 1e9f, ay1 = -1e9f;
+                    for (int k = 0; k < 4; k++) { float vx = ox[a * 4 + k], vy = *(float*)(d + G.vrtx + 8 + (a * 4 + k) * 12 + 4);
+                        ax0 = fminf(ax0, vx); ax1 = fmaxf(ax1, vx); ay0 = fminf(ay0, vy); ay1 = fmaxf(ay1, vy); }
+                    if (ay1 < by0 + 1e-4f || ay0 > by1 - 1e-4f) continue;          // not in this row
+                    if (moved[a * 4]) { if (right ? ax0 > bx0 + 1e-4f : ax1 < bx1 - 1e-4f) first = 0; continue; }
+                    // kept: its inner edge, on the outer side of b
+                    for (int k = 0; k < 4; k++) {
+                        float vx = ox[a * 4 + k], vy = *(float*)(d + G.vrtx + 8 + (a * 4 + k) * 12 + 4);
+                        if (vy < by0 - 1e-4f || vy > by1 + 1e-4f) continue;
+                        if (!right && vx <= bx0 + 1e-4f && vx > kx) { kx = vx; ka = a; }
+                        if (right && vx >= bx1 - 1e-4f && vx < kx) { kx = vx; ka = a; }
+                    }
+                }
+                if (!first || ka < 0 || ka >= 64 || clean[ka]) continue;
+                float w = bx1 - bx0, nb0 = bx0 + m, nb1 = bx1 + m;                 // b where it moved to
+                for (float s0 = right ? nb1 : nb0 - w; right ? s0 < kx - 1e-5f : s0 + w > kx + 1e-5f; s0 += right ? w : -w) {
+                    while (slot < nq && (slot >= 64 || !clean[slot])) slot++;
+                    if (slot >= nq) break;
+                    float x0 = s0, x1 = s0 + w, f0 = 0.0f, f1 = 1.0f;
+                    if (!right && x0 < kx) { f0 = (kx - x0) / w; x0 = kx; }
+                    if (right && x1 > kx) { f1 = (kx - x0) / w; x1 = kx; }
+                    float sx0 = 1e9f, sy0 = 1e9f;
+                    for (int k = 0; k < 4; k++) { sx0 = fminf(sx0, ox[slot * 4 + k]); sy0 = fminf(sy0, *(float*)(d + G.vrtx + 8 + (slot * 4 + k) * 12 + 4)); }
+                    float u0 = 0, u1 = 0;
+                    for (int j = 0; j < 4; j++) { const float* q2 = (const float*)(src + G.uvbs + 8 + (b * 4 + j) * 8);
+                        if (fabsf(ox[b * 4 + j] - bx0) < 1e-5f) u0 = q2[0]; else u1 = q2[0]; }
+                    for (int k = 0; k < 4; k++) {
+                        DWORD dv = slot * 4 + k, sv = b * 4;
+                        int dl = fabsf(ox[dv] - sx0) < 1e-5f, db = fabsf(*(float*)(d + G.vrtx + 8 + dv * 12 + 4) - sy0) < 1e-5f;
+                        for (int j = 0; j < 4; j++) {
+                            int sl = fabsf(ox[b * 4 + j] - bx0) < 1e-5f, sb = fabsf(*(float*)(d + G.vrtx + 8 + (b * 4 + j) * 12 + 4) - by0) < 1e-5f;
+                            if (sl == dl && sb == db) sv = b * 4 + j;
+                        }
+                        float ft = dl ? f0 : f1;
+                        *(float*)(cc + (G.vrtx - g) + 8 + dv * 12) = dl ? x0 : x1;
+                        *(float*)(cc + (G.vrtx - g) + 8 + dv * 12 + 4) = *(float*)(d + G.vrtx + 8 + sv * 12 + 4);
+                        *(float*)(cc + (G.vrtx - g) + 8 + dv * 12 + 8) = *(float*)(d + G.vrtx + 8 + sv * 12 + 8);
+                        *(float*)(cc + (G.uvbs - g) + 8 + dv * 8) = u0 + (u1 - u0) * ft;
+                        *(float*)(cc + (G.uvbs - g) + 8 + dv * 8 + 4) = ((const float*)(src + G.uvbs + 8 + sv * 8))[1];
+                    }
+                    slot++;
+                }
+            }
+            if (slot) { copyOf[ncopy++] = gi; en += gsz; c = cc; }
+        }
+        if (c && !tiles) { copyOf[ncopy++] = gi; en += gsz; }
         g += gsz;
     }
     for (DWORD i = 0; pivt && i < pivtsz / 12 && i < MP_MAXNODE; i++) {   // pivots: by object id
@@ -2715,23 +3005,44 @@ static uint8_t* AdaptMenuPanels(const uint8_t* src, DWORD n, int right, int* pan
         float in = right ? lo[r] : hi[r], u = right ? *x - in : in - *x;
         if (u < MP_CUT) *x += right ? -mv[r] : mv[r];
     }
-    // geoset animations of the copies: the same as their originals'
+    // each copy goes right after its original (drawn in the same place among the other geosets: under the pieces
+    // drawn over its original, such as the profile's name box over the top bar); geoset ids after it move up by one
+    // in the geoset animations, and the copies get their originals' animations
+    #define MP_NEWID(i) ({ int _k = 0; for (int _j = 0; _j < ncopy; _j++) if (copyOf[_j] < (i)) _k++; (i) + _k; })
     uint8_t* ga = (uint8_t*)malloc(geoasz + 16); DWORD gan = 0;
     for (int j = 0; geoa && j < ncopy; j++)
         for (DWORD p = geoa; p + 28 <= geoa + geoasz; ) {
             DWORD isz = *(DWORD*)(d + p);
             if (isz < 28 || p + isz > geoa + geoasz) break;
             if (*(DWORD*)(d + p + 24) == (DWORD)copyOf[j] && gan + isz <= geoasz + 16) {
-                memcpy(ga + gan, d + p, isz); *(DWORD*)(ga + gan + 24) = (DWORD)(gi + j); gan += isz;
+                memcpy(ga + gan, d + p, isz); *(DWORD*)(ga + gan + 24) = (DWORD)(MP_NEWID(copyOf[j]) + 1); gan += isz;
                 break;
             }
             p += isz;
         }
+    for (DWORD p = geoa; geoa && p + 28 <= geoa + geoasz; ) {          // (in d: copied to the output below)
+        DWORD isz = *(DWORD*)(d + p);
+        if (isz < 28 || p + isz > geoa + geoasz) break;
+        int id = (int)*(DWORD*)(d + p + 24);
+        if (id >= 0 && id < 4096) *(DWORD*)(d + p + 24) = (DWORD)MP_NEWID(id);
+        p += isz;
+    }
+    #undef MP_NEWID
     DWORD total = n + en + gan;
     uint8_t* o = (uint8_t*)malloc(total);
     DWORD geosEnd = geos + geosz, geoaEnd = geoa ? geoa + geoasz : 0;
     if (!geoa || geoaHdr < geosHdr) gan = 0, total = n + en;
-    memcpy(o, d, geosEnd); memcpy(o + geosEnd, extra, en);
+    memcpy(o, d, geos);
+    {   // the geosets, each followed by its copy
+        DWORD w = geos, eo = 0; int j = 0, k = 0;
+        for (DWORD g = geos; g + 4 <= geosEnd; k++) {
+            DWORD gsz = *(DWORD*)(d + g);
+            if (gsz < 4 || g + gsz > geosEnd) { memcpy(o + w, d + g, geosEnd - g); w += geosEnd - g; break; }
+            memcpy(o + w, d + g, gsz); w += gsz;
+            if (j < ncopy && copyOf[j] == k) { memcpy(o + w, extra + eo, gsz); w += gsz; eo += gsz; j++; }
+            g += gsz;
+        }
+    }
     if (gan) {
         memcpy(o + geosEnd + en, d + geosEnd, geoaEnd - geosEnd);
         memcpy(o + geoaEnd + en, ga, gan);
@@ -2783,8 +3094,376 @@ static int ServeMenuPanels(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph
     return r;
 }
 
+
+// ---- Battle.net login screen: the doors ---------------------------------------------------------------------------
+// BattleNetMainFrame spans the whole screen (its fields and buttons go to the screen edges), but its picture,
+// BattlenetLoginGlue.mdx, is two doors 0.4 wide each, drawn from the left edge of the frame. Each door is 2 x 3 tiles
+// of 0.2 (posed open: left door at x -0.6..-0.2, right door at 1.0..1.4; their bones slide them in by 0.6). The model
+// is moved to the centre of the screen and every door gets copies of its tiles past its outer edge: mirrored across
+// the edge, then the plain tiles again past those, so the doors reach the screen edges with the pattern continuing
+// (the outer corner ornaments meet their mirror images). The copies are skinned to the same bones, so the doors
+// still slide in and out. Texture u = 0 is moved half a texel in, so the mirror line shows no wrapped-around column.
+static uint8_t* AdaptBnetDoors(const uint8_t* d, DWORD n, float e, int* nTiles, DWORD* outN)
+{
+    if (n < 16 || memcmp(d, "MDLX", 4)) return NULL;
+    DWORD p = 4, mtls = 0, mtlsN = 0, texs = 0, texsN = 0, geos = 0, geosN = 0;
+    while (p + 8 <= n) {
+        DWORD sz = *(DWORD*)(d + p + 4);
+        if (p + 8 + sz > n) return NULL;
+        if (!memcmp(d + p, "MTLS", 4)) { mtls = p + 8; mtlsN = sz; }
+        else if (!memcmp(d + p, "TEXS", 4)) { texs = p + 8; texsN = sz; }
+        else if (!memcmp(d + p, "GEOS", 4)) { geos = p; geosN = sz; }
+        p += 8 + sz;
+    }
+    if (!mtls || !texs || !geos) return NULL;
+    int matTex[64], nm = 0;
+    for (DWORD m = mtls; m + 4 <= mtls + mtlsN; ) {
+        DWORD msz = *(DWORD*)(d + m);
+        if (nm >= 64 || msz < 36 || m + msz > mtls + mtlsN || memcmp(d + m + 12, "LAYS", 4)) return NULL;
+        matTex[nm++] = *(int*)(d + m + 32);
+        m += msz;
+    }
+    // the door tiles: geosets textured with Battlenet-Login-LeftDoor01..06 / RightDoor01..06
+    DWORD tileAt[32], tileSz[32]; int tileSide[32], nt = 0;
+    float outerL = 1e9f, outerR = -1e9f;
+    for (DWORD g = geos + 8; g + 4 <= geos + 8 + geosN; ) {
+        DWORD gsz = *(DWORD*)(d + g);
+        if (gsz < 12 || g + gsz > geos + 8 + geosN) return NULL;
+        DWORD vrtx = 0; int side = -1;
+        for (DWORD q = g + 4; q + 8 <= g + gsz; ) {
+            const uint8_t* t = d + q; DWORD c = *(DWORD*)(t + 4);
+            if (!memcmp(t, "VRTX", 4)) { vrtx = q; q += 8 + c * 12; }
+            else if (!memcmp(t, "NRMS", 4)) q += 8 + c * 12;
+            else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + c * 4;
+            else if (!memcmp(t, "PVTX", 4)) q += 8 + c * 2;
+            else if (!memcmp(t, "GNDX", 4)) q += 8 + c;
+            else if (!memcmp(t, "MATS", 4)) {
+                int mat = *(int*)(t + 8 + c * 4), tex = mat >= 0 && mat < nm ? matTex[mat] : -1;
+                if (tex >= 0 && (DWORD)(tex + 1) * 268 <= texsN) {
+                    const char* tn = (const char*)d + texs + tex * 268 + 4;
+                    for (int k = 1; k <= 6 && side < 0; k++) {
+                        char l[32], r[32];
+                        snprintf(l, sizeof l, "LeftDoor%02d.blp", k); snprintf(r, sizeof r, "RightDoor%02d.blp", k);
+                        if (TexNameIs(tn, l)) side = 0; else if (TexNameIs(tn, r)) side = 1;
+                    }
+                }
+                break;
+            } else break;
+        }
+        if (side >= 0 && vrtx) {
+            if (nt >= 32) return NULL;
+            DWORD c = *(DWORD*)(d + vrtx + 4);
+            for (DWORD i = 0; i < c; i++) {
+                float x = *(const float*)(d + vrtx + 8 + i * 12);
+                if (side == 0) outerL = fminf(outerL, x); else outerR = fmaxf(outerR, x);
+            }
+            tileAt[nt] = g; tileSz[nt] = gsz; tileSide[nt++] = side;
+        }
+        g += gsz;
+    }
+    if (nt != 12 || outerL > 0.0f || outerR < 0.8f) return NULL;
+    // copies: per tile, mirrored (k = 1) and plain one door width further out (k = 2)
+    DWORD extra = 0;
+    for (int i = 0; i < nt; i++) extra += tileSz[i] * 2;
+    uint8_t* o = (uint8_t*)malloc(n + extra);
+    if (!o) return NULL;
+    memcpy(o, d, geos + 8 + geosN);
+    uint8_t* w = o + geos + 8 + geosN;
+    for (int k = 1; k <= 2; k++)
+        for (int i = 0; i < nt; i++) {
+            memcpy(w, d + tileAt[i], tileSz[i]);
+            float a = tileSide[i] ? outerR : outerL, dw = tileSide[i] ? 0.8f : -0.8f;   // dw: two door widths outwards
+            for (DWORD q = 4; q + 8 <= tileSz[i]; ) {
+                uint8_t* t = w + q; DWORD c = *(DWORD*)(t + 4);
+                if (!memcmp(t, "VRTX", 4)) {
+                    for (DWORD v = 0; v < c; v++) { float* x = (float*)(t + 8 + v * 12); *x = k == 1 ? 2 * a - *x : *x + dw; }
+                    q += 8 + c * 12;
+                } else if (!memcmp(t, "NRMS", 4)) q += 8 + c * 12;
+                else if (!memcmp(t, "PVTX", 4)) {
+                    if (k == 1) for (DWORD v = 0; v + 2 < c; v += 3) {         // mirrored: keep the triangles' winding
+                        unsigned short* ix = (unsigned short*)(t + 8 + v * 2), tmp = ix[1]; ix[1] = ix[2]; ix[2] = tmp;
+                    }
+                    q += 8 + c * 2;
+                } else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + c * 4;
+                else if (!memcmp(t, "GNDX", 4)) q += 8 + c;
+                else if (!memcmp(t, "MATS", 4)) { while (q + 8 <= tileSz[i] && memcmp(w + q, "UVAS", 4)) q += 4; }
+                else if (!memcmp(t, "UVAS", 4)) q += 8;
+                else if (!memcmp(t, "UVBS", 4)) q += 8 + c * 8;
+                else break;
+            }
+            w += tileSz[i];
+        }
+    memcpy(w, d + geos + 8 + geosN, n - (geos + 8 + geosN)); w += n - (geos + 8 + geosN);
+    *(DWORD*)(o + geos + 4) = geosN + extra;
+    DWORD on = (DWORD)(w - o);
+    // all geosets: x moved to the screen centre; door tiles: u = 0 half a texel in (256-texel textures)
+    p = 4;
+    while (p + 8 <= on) {
+        DWORD sz = *(DWORD*)(o + p + 4);
+        if (!memcmp(o + p, "GEOS", 4)) {
+            for (DWORD g = p + 8; g + 4 <= p + 8 + sz; ) {
+                DWORD gsz = *(DWORD*)(o + g); int door = 0;
+                for (DWORD q = g + 4; q + 8 <= g + gsz; ) {
+                    uint8_t* t = o + q; DWORD c = *(DWORD*)(t + 4);
+                    if (!memcmp(t, "VRTX", 4)) { for (DWORD v = 0; v < c; v++) *(float*)(t + 8 + v * 12) += e; q += 8 + c * 12; }
+                    else if (!memcmp(t, "NRMS", 4)) q += 8 + c * 12;
+                    else if (!memcmp(t, "PVTX", 4)) q += 8 + c * 2;
+                    else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + c * 4;
+                    else if (!memcmp(t, "GNDX", 4)) q += 8 + c;
+                    else if (!memcmp(t, "MATS", 4)) {
+                        int mat = *(int*)(t + 8 + c * 4), tex = mat >= 0 && mat < nm ? matTex[mat] : -1;
+                        door = tex >= 0 && (DWORD)(tex + 1) * 268 <= texsN && strstr((const char*)d + texs + tex * 268 + 4, "Door0")
+                            && !TexNameIs((const char*)d + texs + tex * 268 + 4, "Door07.blp") && !TexNameIs((const char*)d + texs + tex * 268 + 4, "Door08.blp")
+                            && !TexNameIs((const char*)d + texs + tex * 268 + 4, "Door09.blp");
+                        while (q + 8 <= g + gsz && memcmp(o + q, "UVAS", 4)) q += 4;
+                    }
+                    else if (!memcmp(t, "UVAS", 4)) q += 8;
+                    else if (!memcmp(t, "UVBS", 4)) {
+                        if (door) for (DWORD v = 0; v < c; v++) { float* u = (float*)(t + 8 + v * 8); if (*u < 0.5f / 256) *u = 0.5f / 256; }
+                        q += 8 + c * 8;
+                    } else break;
+                }
+                g += gsz;
+            }
+        } else if (!memcmp(o + p, "PIVT", 4)) {
+            for (DWORD v = 0; v + 12 <= sz; v += 12) *(float*)(o + p + 8 + v) += e;
+        }
+        p += 8 + sz;
+    }
+    *nTiles = nt; *outN = on;
+    return o;
+}
+static int ServeBnetDoors(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
+{
+    if (!g_enabled || !g_glue || !g_menuEdges || g_aspect < 1.34) return 0;
+    const char* bn = strrchr(name, '\\'); bn = bn ? bn + 1 : name;
+    if (_strnicmp(bn, "BattlenetLoginGlue.md", 21)) return 0;
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return 0;
+    DWORD n = S_Size(h, NULL), got = 0;
+    uint8_t* buf = (n > 0 && n < (4u << 20)) ? (uint8_t*)malloc(n) : NULL;
+    int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
+    S_Close(h);
+    int tiles = 0; DWORD on = 0;
+    uint8_t* o = ok ? AdaptBnetDoors(buf, n, g_e, &tiles, &on) : NULL;
+    free(buf);
+    static char path[MAX_PATH];
+    ok = o != NULL;
+    if (ok) {
+        char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
+        char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
+        strcat(dir, "W3TrueWidescreen_cache");
+        CreateDirectoryA(dir, NULL);
+        snprintf(path, sizeof path, "%s\\Bnet-BattlenetLoginGlue.mdx", dir);
+        FILE* f = fopen(path, "wb");
+        ok = f && fwrite(o, 1, on, f) == on;
+        if (f) fclose(f);
+    }
+    free(o);
+    if (!ok) { logf_("Battle.net login doors %s not adapted", name); return 0; }
+    BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
+    if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
+    logf_("Battle.net login doors widened by %.4f (%d tiles copied) (%d)", g_e, tiles, r);
+    return r;
+}
+
+
+// ---- Battle.net screens: the button bar --------------------------------------------------------------------------
+// CenterPanel(-Expansion).mdx is one strip 0.8 wide (four tiles: 512, 512, 512 and 64 texels of 128 high, 2000
+// texels per unit), drawn from the left edge of the screen-wide chat panel, with a lion medallion at each end, cut
+// by the edge. It is moved to the centre (with the banner and the buttons) and continued to the screen edges:
+// mirrored across each lion's centre line (the medallion becomes whole, then the ornament panel and the stud column
+// next to it), then the plain metal between two button slots, mirrored back and forth. Each piece is a copy of a
+// tile geoset (same bone) with its own x span and texture u span.
+#define BB_CL 47.0f            // left lion centre (texels)
+#define BB_CR 1551.0f          // right lion centre
+#define BB_SL 321.0f           // left: last texel before the first button slot
+#define BB_SR 1281.0f          // right: first texel after the last button slot (and its bevel)
+// the middle rows past the mirrored part, back and forth: plain metal from a pillar between two slots, without their
+// bevels, as light as the metal where the mirrored part stops (left: the pillar after the first slot; right: the
+// pillar before the last one, lit like the right end -- the first one is darker than that, it showed as a seam)
+#define BB_ML0 641.0f
+#define BB_ML1 659.0f
+#define BB_MR0 1180.0f          // (read from here, next to the mirrored part: the pillar's column closest to the metal
+#define BB_MR1 1166.0f          // where that part stops, row by row)
+#define BB_B0 330.0f           // the bar's top and bottom bands over a slot, without snow (past the studs)
+#define BB_B1 530.0f
+#define BB_R0 (11.0f / 128.0f) // rows of plain metal: below the bar's top edge, above its bottom edge (as by the studs)
+#define BB_R1 (115.0f / 128.0f)
+typedef struct { float x0, x1, s0, s1, v0, v1; int tile; } BbPiece;   // model x span (texels), texel span (s0 at x0), rows
+static int BbTileOf(float a, float b) { float m = (a + b) * 0.5f; return m < 512 ? 0 : m < 1024 ? 1 : m < 1536 ? 2 : 3; }
+// pieces from a texel range [a, b] mirrored back and forth, laid from x = start outwards (dir -1: to the left)
+static int BbAlt(BbPiece* o, int n, int max, float start, float len, int dir, float a, float b, float v0, float v1)
+{
+    float w = fabsf(b - a), sg = b < a ? -1.0f : 1.0f, done = 0;   // (b < a: the range read backwards)
+    for (int k = 0; done < len - 1e-4f && n < max; k++) {
+        float part = len - done < w ? len - done : w;
+        float xi = start + dir * done, xo = start + dir * (done + part);     // inner / outer end
+        float si = k % 2 == 0 ? a : b, so = k % 2 == 0 ? a + sg * part : b - sg * part;
+        o[n++] = dir < 0 ? (BbPiece){ xo, xi, so, si, v0, v1, BbTileOf(a, b) } : (BbPiece){ xi, xo, si, so, v0, v1, BbTileOf(a, b) };
+        done += part;
+    }
+    return n;
+}
+static int BbPieces(float ex, float xr, BbPiece* o, int max)   // ex: texels to add on each side; xr: right end of the strip
+{
+    int n = 0;
+    // left (x < 0): mirrored across the lion's centre line up to the first slot (the medallion, the ornament panel,
+    // the studs); past that the bands go on as over a slot and the middle rows are plain metal
+    float a = 2 * BB_CL - BB_SL, x0 = a > -ex ? a : -ex;
+    o[n++] = (BbPiece){ x0, 0.0f, 2 * BB_CL - x0, 2 * BB_CL, 0.0f, 1.0f, 0 };
+    if (x0 > -ex) {
+        float len = x0 + ex;
+        n = BbAlt(o, n, max, x0, len, -1, BB_B0, BB_B1, 0.0f, BB_R0);
+        n = BbAlt(o, n, max, x0, len, -1, BB_B0, BB_B1, BB_R1, 1.0f);
+        n = BbAlt(o, n, max, x0, len, -1, BB_ML0, BB_ML1, BB_R0, BB_R1);
+    }
+    // right (x > 1600)
+    float b = 2 * BB_CR - BB_SR, x1 = b < xr + ex ? b : xr + ex;
+    if (n < max) { o[n] = (BbPiece){ xr, x1, 2 * BB_CR - xr, 2 * BB_CR - x1, 0.0f, 1.0f, 0 }; o[n].tile = BbTileOf(o[n].s0, o[n].s1); n++; }
+    if (x1 < xr + ex) {
+        float len = xr + ex - x1;
+        n = BbAlt(o, n, max, x1, len, 1, BB_B0, BB_B1, 0.0f, BB_R0);
+        n = BbAlt(o, n, max, x1, len, 1, BB_B0, BB_B1, BB_R1, 1.0f);
+        n = BbAlt(o, n, max, x1, len, 1, BB_MR0, BB_MR1, BB_R0, BB_R1);
+    }
+    return n;
+}
+static uint8_t* AdaptBnetBar(const uint8_t* d, DWORD n, float e, int* nPieces, DWORD* outN)
+{
+    if (n < 16 || memcmp(d, "MDLX", 4)) return NULL;
+    DWORD p = 4, mtls = 0, mtlsN = 0, texs = 0, texsN = 0, geos = 0, geosN = 0;
+    while (p + 8 <= n) {
+        DWORD sz = *(DWORD*)(d + p + 4);
+        if (p + 8 + sz > n) return NULL;
+        if (!memcmp(d + p, "MTLS", 4)) { mtls = p + 8; mtlsN = sz; }
+        else if (!memcmp(d + p, "TEXS", 4)) { texs = p + 8; texsN = sz; }
+        else if (!memcmp(d + p, "GEOS", 4)) { geos = p; geosN = sz; }
+        p += 8 + sz;
+    }
+    if (!mtls || !texs || !geos) return NULL;
+    int matTex[16], nm = 0;
+    for (DWORD m = mtls; m + 4 <= mtls + mtlsN; ) {
+        DWORD msz = *(DWORD*)(d + m);
+        if (nm >= 16 || msz < 36 || m + msz > mtls + mtlsN || memcmp(d + m + 12, "LAYS", 4)) return NULL;
+        matTex[nm++] = *(int*)(d + m + 32); m += msz;
+    }
+    // the four tile geosets (one quad each), by texture CenterPanel01..04
+    DWORD tg[4] = { 0 }, tsz[4] = { 0 }, tv[4] = { 0 }, tu[4] = { 0 };
+    for (DWORD g = geos + 8; g + 4 <= geos + 8 + geosN; ) {
+        DWORD gsz = *(DWORD*)(d + g), vrtx = 0, uvbs = 0; int tile = -1;
+        if (gsz < 12 || g + gsz > geos + 8 + geosN) return NULL;
+        for (DWORD q = g + 4; q + 8 <= g + gsz; ) {
+            const uint8_t* t = d + q; DWORD c = *(DWORD*)(t + 4);
+            if (!memcmp(t, "VRTX", 4)) { vrtx = q; q += 8 + c * 12; }
+            else if (!memcmp(t, "NRMS", 4)) q += 8 + c * 12;
+            else if (!memcmp(t, "PTYP", 4) || !memcmp(t, "PCNT", 4) || !memcmp(t, "MTGC", 4)) q += 8 + c * 4;
+            else if (!memcmp(t, "PVTX", 4)) q += 8 + c * 2;
+            else if (!memcmp(t, "GNDX", 4)) q += 8 + c;
+            else if (!memcmp(t, "MATS", 4)) {
+                int mat = *(int*)(t + 8 + c * 4), tex = mat >= 0 && mat < nm ? matTex[mat] : -1;
+                if (tex >= 0 && (DWORD)(tex + 1) * 268 <= texsN) {
+                    const char* tn = (const char*)d + texs + tex * 268 + 4;
+                    for (int k = 0; k < 4; k++) {
+                        char a[32], b[32]; snprintf(a, sizeof a, "CenterPanel%02d", k + 1); snprintf(b, sizeof b, "CenterPanel%02d-Expansion", k + 1);
+                        if (TexNameIs(tn, a) || TexNameIs(tn, b) || (snprintf(a, sizeof a, "CenterPanel%02d.blp", k + 1), TexNameIs(tn, a))
+                            || (snprintf(b, sizeof b, "CenterPanel%02d-Expansion.blp", k + 1), TexNameIs(tn, b))) tile = k;
+                    }
+                }
+                while (q + 8 <= g + gsz && memcmp(d + q, "UVAS", 4)) q += 4;
+            }
+            else if (!memcmp(t, "UVAS", 4)) q += 8;
+            else if (!memcmp(t, "UVBS", 4)) { uvbs = q; q += 8 + c * 8; }
+            else break;
+        }
+        if (tile >= 0 && vrtx && uvbs && *(DWORD*)(d + vrtx + 4) == 4 && *(DWORD*)(d + uvbs + 4) == 4) { tg[tile] = g; tsz[tile] = gsz; tv[tile] = vrtx - g; tu[tile] = uvbs - g; }
+        g += gsz;
+    }
+    for (int k = 0; k < 4; k++) if (!tg[k]) return NULL;
+    float xr = 0.0f;
+    for (int c = 0; c < 4; c++) xr = fmaxf(xr, *(const float*)(d + tg[3] + tv[3] + 8 + c * 12) * 2000.0f);
+    static BbPiece pc[256]; int np = BbPieces(e * 2000.0f + (1600.0f - xr), xr, pc, 256);
+    DWORD extra = 0;
+    for (int i = 0; i < np; i++) extra += tsz[pc[i].tile];
+    uint8_t* o = (uint8_t*)malloc(n + extra);
+    if (!o) return NULL;
+    memcpy(o, d, geos + 8 + geosN);
+    uint8_t* w = o + geos + 8 + geosN;
+    static const float tileS0[4] = { 0, 512, 1024, 1536 }, tileW[4] = { 512, 512, 512, 64 };
+    for (int i = 0; i < np; i++) {
+        int t = pc[i].tile;
+        memcpy(w, d + tg[t], tsz[t]);
+        float* v = (float*)(w + tv[t] + 8); float* uv = (float*)(w + tu[t] + 8);
+        float xmin = 1e9f, xmax = -1e9f, ylo = 1e9f, yhi = -1e9f;
+        for (int c = 0; c < 4; c++) { xmin = fminf(xmin, v[c * 3]); xmax = fmaxf(xmax, v[c * 3]); ylo = fminf(ylo, v[c * 3 + 1]); yhi = fmaxf(yhi, v[c * 3 + 1]); }
+        for (int c = 0; c < 4; c++) {
+            int atMin = fabsf(v[c * 3] - xmin) < fabsf(v[c * 3] - xmax), top = fabsf(v[c * 3 + 1] - yhi) < fabsf(v[c * 3 + 1] - ylo);
+            float x = atMin ? pc[i].x0 : pc[i].x1, sx = atMin ? pc[i].s0 : pc[i].s1, vv = top ? pc[i].v0 : pc[i].v1;
+            v[c * 3] = x / 2000.0f;
+            v[c * 3 + 1] = yhi - vv * (yhi - ylo);                  // texture v 0 at the top edge
+            uv[c * 2 + 1] = vv;
+            float u = (sx - tileS0[t]) / tileW[t];
+            uv[c * 2] = u < 0.5f / tileW[t] ? 0.5f / tileW[t] : u > 1 - 0.5f / tileW[t] ? 1 - 0.5f / tileW[t] : u;
+        }
+        w += tsz[t];
+    }
+    memcpy(w, d + geos + 8 + geosN, n - (geos + 8 + geosN)); w += n - (geos + 8 + geosN);
+    *(DWORD*)(o + geos + 4) = geosN + extra;
+    DWORD on = (DWORD)(w - o);
+    // everything to the centre of the screen
+    for (p = 4; p + 8 <= on; ) {
+        DWORD sz = *(DWORD*)(o + p + 4);
+        if (!memcmp(o + p, "GEOS", 4)) {
+            for (DWORD g = p + 8; g + 4 <= p + 8 + sz; ) {
+                DWORD gsz = *(DWORD*)(o + g);
+                if (!memcmp(o + g + 4, "VRTX", 4)) for (DWORD v = 0, c = *(DWORD*)(o + g + 8); v < c; v++) *(float*)(o + g + 12 + v * 12) += e;
+                g += gsz;
+            }
+        } else if (!memcmp(o + p, "PIVT", 4)) for (DWORD v = 0; v + 12 <= sz; v += 12) *(float*)(o + p + 8 + v) += e;
+        p += 8 + sz;
+    }
+    *nPieces = np; *outN = on;
+    return o;
+}
+static int ServeBnetBar(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
+{
+    if (!g_enabled || !g_glue || !g_menuWide || g_aspect < 1.34) return 0;
+    const char* bn = strrchr(name, '\\'); bn = bn ? bn + 1 : name;
+    if (_stricmp(bn, "CenterPanel.mdx") && _stricmp(bn, "CenterPanel-Expansion.mdx") && _stricmp(bn, "CenterPanel.mdl") && _stricmp(bn, "CenterPanel-Expansion.mdl")) return 0;
+    if (!strstr(name, "BattlenetChatGlue") && !strstr(name, "BattleNetChatGlue")) return 0;
+    HANDLE h = 0;
+    if (!orig_SOpenEx(mpq, name, scope, &h) || !h) return 0;
+    DWORD n = S_Size(h, NULL), got = 0;
+    uint8_t* buf = (n > 0 && n < (1u << 20)) ? (uint8_t*)malloc(n) : NULL;
+    int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
+    S_Close(h);
+    int pieces = 0; DWORD on = 0;
+    uint8_t* o = ok ? AdaptBnetBar(buf, n, g_e, &pieces, &on) : NULL;
+    free(buf);
+    static char path[MAX_PATH];
+    ok = o != NULL;
+    if (ok) {
+        char dir[MAX_PATH]; GetModuleFileNameA(NULL, dir, MAX_PATH);
+        char* sl = strrchr(dir, '\\'); if (sl) *(sl + 1) = 0;
+        strcat(dir, "W3TrueWidescreen_cache");
+        CreateDirectoryA(dir, NULL);
+        snprintf(path, sizeof path, "%s\\Bnet-%s", dir, bn);
+        FILE* f = fopen(path, "wb");
+        ok = f && fwrite(o, 1, on, f) == on;
+        if (f) fclose(f);
+    }
+    free(o);
+    if (!ok) { logf_("Battle.net button bar %s not adapted", name); return 0; }
+    BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
+    if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
+    logf_("Battle.net button bar centred and continued to the edges (%d pieces) (%d)", pieces, r);
+    return r;
+}
+
 static BOOL __stdcall SOpenEx_hook(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
+    if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeBnetBar(mpq, name, scope, ph)) return TRUE;
+    if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeBnetDoors(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeMenuPanels(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeWidenedLoading(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH)) CheckMapScript(mpq, name, scope);
@@ -3793,6 +4472,45 @@ static void InstallFpsLimit(void)
     WriteJmp(a, G->renderSelfEcx ? (u32)RenderEventEcx_det : (u32)RenderEvent_det);
     InstallHiresTicks();
     logf_("fps limit: %d fps (min frame %.3f ms)", g_fpsLimit, g_minFrameMs);
+    // Fullscreen: the game sets the display mode at its 'refreshrate' setting (Video, in the registry; 60 or 75
+    // unless changed) and waits for vsync, so that is the real cap there ('maxfps' does nothing). When it is below
+    // FpsLimit, raise it to the monitor's highest rate at the game's resolution, through the game's own settings
+    // (CGameSettings: get / set value / store in the registry), before the display is set up.
+    HKEY k; DWORD rr = 0, rw = 0, rh = 0, sz = 4, ty = 0;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Blizzard Entertainment\\Warcraft III\\Video", 0, KEY_READ, &k) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(k, "refreshrate", NULL, &ty, (BYTE*)&rr, &sz) != ERROR_SUCCESS || ty != REG_DWORD) rr = 0;
+        sz = 4; RegQueryValueExA(k, "reswidth", NULL, NULL, (BYTE*)&rw, &sz);
+        sz = 4; RegQueryValueExA(k, "resheight", NULL, NULL, (BYTE*)&rh, &sz);
+        RegCloseKey(k);
+    }
+    DEVMODEA dm; DWORD best = 0, bestAny = 0;
+    for (DWORD i = 0; ; i++) {
+        memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+        if (!EnumDisplaySettingsA(NULL, i, &dm)) break;
+        if (dm.dmDisplayFrequency > bestAny) bestAny = dm.dmDisplayFrequency;
+        if (dm.dmPelsWidth == rw && dm.dmPelsHeight == rh && dm.dmDisplayFrequency > best) best = dm.dmDisplayFrequency;
+    }
+    if (!best) best = bestAny;
+    static const u32 kSettings[2][3] = { { 0x5720, 0x57F0, 0x5BB0 }, { 0x40ED0, 0x42B40, 0x40310 } };   // get, set, store
+    const u32* fn = kSettings[G->build == 6401 ? 0 : 1];
+    if (best > rr && (int)rr < g_fpsLimit && best < 1000) {
+        typedef u32 (__cdecl *GetSettings_t)(void);
+        typedef int (__thiscall *SetInt_t)(u32, int, int);
+        typedef int (__thiscall *Store_t)(u32, int);
+        u32 st = ((GetSettings_t)(g_base + fn[0]))();
+        if (st) {
+            ((SetInt_t)(g_base + fn[1]))(st, 4, (int)best);       // 4: refreshrate
+            ((Store_t)(g_base + fn[2]))(st, 4);
+            // and in the registry itself: the game may read its settings from there after this point (and write
+            // them back on exit)
+            if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Blizzard Entertainment\\Warcraft III\\Video", 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS) {
+                RegSetValueExA(k, "refreshrate", 0, REG_DWORD, (const BYTE*)&best, 4);
+                RegCloseKey(k);
+            }
+            logf_("fps limit: refreshrate %lu -> %lu Hz (the monitor's highest at %lux%lu): fullscreen vsync no longer caps the frame rate below %d",
+                  rr, best, rw, rh, g_fpsLimit);
+        } else logf_("fps limit: game settings not available, refreshrate stays %lu", rr);
+    } else if (rr) logf_("fps limit: refreshrate %lu (monitor's highest %lu)", rr, best);
 }
 
 static void Install(void)
@@ -3804,7 +4522,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.13  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.14  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401 or 1.27b / 7085)"); return; }
     logf_("Warcraft III %s", G->name);
@@ -3898,6 +4616,7 @@ static void Install(void)
     g_wideD = g_uiW_d; g_wideE = g_e; g_pickTopWide = g_pickTop;
     if (g_glue && g_menuEdges >= 2 && g_aspect > 1.34) g_menuWide = 1;
     g_enabled = 1;
+    if (g_glue && !g_menuEdges && g_aspect > 1.34) { g_narrowWant = 1; SetGlueNarrow(1); }
     logf_("active");
 }
 
