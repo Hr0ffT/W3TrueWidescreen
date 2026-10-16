@@ -1,4 +1,5 @@
-// W3TrueWidescreen.mix - unstretched widescreen for Warcraft III 1.26a (Game.dll build 6401) and 1.27b (build 7085)
+// W3TrueWidescreen.mix - unstretched widescreen for Warcraft III 1.26a (Game.dll build 6401), 1.27b (build 7085) and
+// 1.28.5 (build 7680)
 // Copyright (c) 2026 Hr0ffT - MIT License - https://github.com/Hr0ffT
 //
 // The engine lays out its UI in a virtual 0.8 x 0.6 screen and stretches it to the monitor.
@@ -167,8 +168,43 @@ static const GameAddrs kGames[] = {
     0,
     { 0x3840E0, 6, "\x55\x8B\xEC\x83\xEC\x18" },
     { 0x36C2F0, 9, "\x55\x8B\xEC\x8B\x55\x08\x8B\x45\x0C" } },
+  { 7680, "1.28.5", 1,
+    { 0x13FC20, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" }, { 0x13FAD0, 5, "\x55\x8B\xEC\x56\x57" }, { 0x13FBB0, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" },
+    0x13F020, 0x13FCE0, 0x13FB40, 0x14C6A0,
+    { 0x867F18, 0x867F29, 0x867F70, 0x867FB8, 0x867FD8, 0x867FE9, 0x868030, 0x868078,
+      0x3F5B7D, 0x2E80C7, 0x335923 }, 0xA7CF34,
+    { 0x867F3B, 0x867F4D, 0x867F85, 0x867FA8, 0x867FFB, 0x86800D, 0x868045, 0x868068 }, 0xA7CF30,
+    1, 0x1C5DF6, 0x3F4CCCCD, 0x1C5DE6, 0x3F19999A,
+    0x3B829E, 0xAAC330,
+    0xAAA730, 0xAAA818, 0xA7CBCC, 0xA7D51C, 0xA7AD14, 0xAA14D0, 0xAA298C, 0xAAF1C4, 0xAAE290,
+    0xAB2980, 0xAAD83C, 0xA7CC14, 0xA7D7E0,
+    0x3D2A5F, { 0x32E6F9, 0x323C38, 0x31B39F }, 0x313CB8,
+    { 0x1554F0, 6, "\x55\x8B\xEC\x83\xE4\xF8" }, { 0x3B9A60, 5, "\x56\x8B\xF1\x33\xD2" },
+    0xD0F948, 0xD1ACA8, 0, 0,
+    0x3D57F0, 0x3D59E7, 0x13E3C0, 0x13E437,
+    { 0x3C67CF, 0x3D07AE, 0x3D0834, 0x3D2471, 0x3D24F2, 0x3D2632, 0x3D3161, 0x3D31E7 }, 0x13C390,
+    { 0x13A700, 10, "\x55\x8b\xec\x83\xec\x08\x53\x8b\x5d\x08" }, { 0x3C681F, 7, "\x8B\x81\x84\x00\x00\x00\x40" }, 0x3C6825, 0x40, 0x90,
+    // 1.28 reads the size with get_VideoWidth / get_VideoHeight, keeps a default for 0 and crops 8 lines itself
+    // (put_SourceHeight): only the two reads are replaced, by GetVideoSize
+    { 0x16DF35, 23, "\x8b\x01\x8d\x55\xd8\x52\x51\xff\x50\x28\x8b\x45\xd4\x8d\x55\xd0\x52\x50\x8b\x08\xff\x51\x2c" },
+    { 0x16DFF2, 6, "\xff\x96\x9c\x00\x00\x00" },
+    { 0x16D02D, 7, "\xc7\x45\x88\x00\x00\x5c\x00" }, { 0x16E3D6, 9, "\x33\xd2\x32\xc9\xe8\x71\xeb\xff\xff" },
+    "\x8b\x01"                          // mov  eax, [ecx]
+    "\x8d\x55\xd0\x52"                  // lea  edx, [ebp-30h] (height) ; push edx
+    "\x8d\x55\xd8\x52"                  // lea  edx, [ebp-28h] (width) ; push edx
+    "\x51"                              // push ecx
+    "\xff\x90\x88\x00\x00\x00"          // call [eax+88h]  IBasicVideo::GetVideoSize
+    "\x90\x90\x90\x90\x90\x90",
+    0x16D0D6, 0x16E39B, 0x16DA43, 0x166759, 0x16D770, 5,
+    0, 0, 0xD1B554, 0xD1AD10, 0xD1AD14, 0xD1AD24,
+    { 0x0A5090, 5, "\x53\x56\x57\x8b\xf9" }, 1, 0x0A4FFD,
+    0, 0,
+    0,
+    { 0x3B81F0, 6, "\x55\x8B\xEC\x83\xEC\x18" },
+    { 0x3A0340, 9, "\x55\x8B\xEC\x8B\x55\x08\x8B\x45\x0C" } },
 };
 static const GameAddrs* G;           // the running build
+static int BuildIdx(void) { return G->build == 6401 ? 0 : G->build == 7085 ? 1 : 2; }   // row in the per-build tables
 #define VT(name) (G->vt##name)
 static int CodeIs(const Code* c) { return c->rva && !memcmp((void*)(g_base + c->rva), c->bytes, c->len); }
 
@@ -250,12 +286,13 @@ static int g_menuWide = 0;    // MenuLayout=2 in effect (wide screen) // MenuLay
 static const u32 kWideScreens[][7] = {
     { 0x965534, 0x964DFC, 0x962A44, 0x962924, 0x962BC8, 0x967A60, 0x965644 },   // 1.26a
     { 0xAB2058, 0xAB1EF8, 0xAB21B8, 0xAB2318, 0xAB247C, 0xAB1D98, 0xAB1C2C },   // 1.27b
+    { 0xAA2294, 0xAA2134, 0xAA23F8, 0xAA2560, 0xAA26C8, 0xAA1FD0, 0xAA1E5C },   // 1.28.5
 };
 static float MenuPanelMove(float in, int right);
 static int WideScreen(u32 parent)     // 0: no; 1: skirmish; 2: the others
 {
     u32 vt = VtRva(parent);
-    const u32* t = kWideScreens[G->build == 6401 ? 0 : 1];
+    const u32* t = kWideScreens[BuildIdx()];
     for (int i = 0; i < 7; i++) if (vt == t[i]) return i == 0 ? 1 : 2;
     return 0;
 }
@@ -350,13 +387,14 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
     // stay centred in them); the bottom right button panel stays
     // (chat panel first: the only one with the top area; then standard game, profile, team game, custom game
     // create / join / load)
-    static const u32 kBnetScreens[2][7] = {
+    static const u32 kBnetScreens[3][7] = {
         { 0x964224, 0x965C00, 0x966A38, 0x965D24, 0x960EB8, 0x9612F0, 0x96153C },
-        { 0xAAC1CC, 0xAAF87C, 0xAAF1BC, 0xAAFE70, 0xAADA34, 0xAAE050, 0xAAE3E4 } };
+        { 0xAAC1CC, 0xAAF87C, 0xAAF1BC, 0xAAFE70, 0xAADA34, 0xAAE050, 0xAAE3E4 },
+        { 0xA9C228, 0xA9F930, 0xA9F270, 0xA9FF3C, 0xA9DAB0, 0xA9E0D8, 0xA9E470 } };
     int bs = -1;
     if (g_enabled && g_menuWide && rel < 8) {
         u32 pv = VtRva(parent);
-        for (int i = 0; i < 7; i++) if (pv == kBnetScreens[G->build == 6401 ? 0 : 1][i]) bs = i;
+        for (int i = 0; i < 7; i++) if (pv == kBnetScreens[BuildIdx()][i]) bs = i;
     }
     if (bs >= 0) {
         float m = MenuPanelMove(0.5f, 0), h = bs == 0 && y > -0.14f && rel <= 2 ? 1.0f : g_menuEdges == 3 ? 0.5f : 1.0f;
@@ -699,16 +737,17 @@ static int GetRenderDevice(RenderDev* d)
     typedef HRESULT (__stdcall *QI_t)(u32, const GUID*, void**);
     typedef ULONG (__stdcall *Rel_t)(u32);
     static int ofs = -1;
-    if (ofs == -1) {                                  // 1.27: the device sits at the same place as in 1.26; check it once
-        ofs = -2;
-        u32 p = IsBadReadPtr((void*)gx, 0x588) ? 0 : *(u32*)(gx + 0x584);
+    if (ofs == -1) {                                  // 1.27: the device sits at the same place as in 1.26 (1.28: at 0x5A0,
+        ofs = -2;                                     // after the IDirect3D9 at 0x59C); check it once
+        u32 at = G->build == 7680 ? 0x5A0 : 0x584;
+        u32 p = IsBadReadPtr((void*)gx, at + 4) ? 0 : *(u32*)(gx + at);
         u32* vt = (p && !IsBadReadPtr((void*)p, 4)) ? *(u32**)p : NULL;
         u32 q = 0; HRESULT hr = E_POINTER;
         if (vt && !IsBadReadPtr(vt, 119 * 4)) hr = ((QI_t)vt[0])(p, &kIID_D3DDevice9, (void**)&q);
         char mn[MAX_PATH] = "?"; HMODULE vm = NULL;
         if (vt && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[0], &vm) && vm)
             GetModuleFileNameA(vm, mn, sizeof mn);
-        if (hr == S_OK && q) { ((Rel_t)(*(u32**)q)[2])(q); ofs = 0x584; logf_("Direct3D 9 device %08X (%s)", p, mn); }
+        if (hr == S_OK && q) { ((Rel_t)(*(u32**)q)[2])(q); ofs = (int)at; logf_("Direct3D 9 device %08X (%s)", p, mn); }
         else logf_("Direct3D 9 device not found (%08X, %08lX, %s), console backing off", p, hr, mn);
     }
     if (ofs < 0) return 0;
@@ -3570,6 +3609,21 @@ static HWND FindGameWindow(void)      // the game's main (largest visible, unown
     EnumWindows(FindGameWndProc, (LPARAM)&best);
     return best;
 }
+// 1.28 keeps the movie's filter graph (or a reference to it) after the movie, and MPC Video Renderer refuses to
+// create a second instance while one exists: the next movie fell back to the system renderer. So the graph is
+// held from the moment the renderer joins it, and when the game's play function returns (the movie has ended)
+// the renderer is taken out of it and the graph let go.
+typedef ULONG (__stdcall *AddRef_t)(void*);
+typedef HRESULT (__stdcall *RemoveFilter_t)(void*, void*);
+static void* g_movieGraph; static void* g_movieVr;
+static void MovieEnded(void)
+{
+    if (!g_movieGraph) return;
+    HRESULT hr = ((RemoveFilter_t)VTBL(g_movieGraph)[4])(g_movieGraph, g_movieVr);
+    ULONG left = ((Release_t)VTBL(g_movieGraph)[2])(g_movieGraph);
+    dlogf_("movies: renderer taken out of the graph (%08lX), graph references left %lu", hr, left);
+    g_movieGraph = g_movieVr = NULL;
+}
 static void AddMpcvrToGraph(void* graph)
 {
     void* cf = NULL; void* flt = NULL; void* fg = NULL;
@@ -3626,6 +3680,9 @@ static void AddMpcvrToGraph(void* graph)
     if (SUCCEEDED(((QI_t)VTBL(graph)[0])(graph, &kIID_IFilterGraph, &fg)) && fg) {
         hr = ((AddFilter_t)VTBL(fg)[3])(fg, flt, L"MPC Video Renderer");
         dlogf_("movies: MPC Video Renderer added to the graph (%08lX)", hr);
+        if (SUCCEEDED(hr) && !g_movieGraph) {              // kept until the movie has ended (see MovieEnded)
+            ((AddRef_t)VTBL(fg)[1])(fg); g_movieGraph = fg; g_movieVr = flt;
+        }
         // The Windows MPEG-4 decoder corrupts these DivX streams when it feeds MPC Video Renderer;
         // LAV Video (ffmpeg) decodes them correctly. Filters already in the graph are tried first.
         // The Microsoft AVI Splitter passes DivX "packed bitstream" B-frames through as is, which leaves the
@@ -3648,6 +3705,7 @@ static void AddMpcvrToGraph(void* graph)
 }
 
 static void HookVideoExtensions(void);
+static int InstallPlayHook(void);
 static HRESULT WINAPI CoCreate_hook(REFCLSID clsid, LPUNKNOWN outer, DWORD ctx, REFIID iid, LPVOID* out)
 {
     static int extLog;
@@ -4109,6 +4167,9 @@ static void InstallMovieRenderer(void)
         if (G->moviePos.len == 9) {                                // 1.26: mov eax,[edi+9Ch] -> mov eax, SetWinPos_wrap ; nop
             uint8_t p[6] = { 0xb8, 0, 0, 0, 0, 0x90 }; memcpy(p + 1, &f, 4);
             WriteMem(g_base + G->moviePos.rva, p, 6);
+        } else if (G->moviePos.len == 6) {                         // 1.28: call [esi+9Ch] -> call SetWinPos_wrap ; nop
+            uint8_t p[6] = { 0xe8, 0, 0, 0, 0, 0x90 }; int32_t rel = (int32_t)(f - (g_base + G->moviePos.rva + 5)); memcpy(p + 1, &rel, 4);
+            WriteMem(g_base + G->moviePos.rva, p, 6);
         } else {                                                   // 1.27: mov edx,[ecx] ; call [edx+9Ch] -> mov eax, SetWinPos_wrap ; call eax ; nop
             uint8_t p[8] = { 0xb8, 0, 0, 0, 0, 0xff, 0xd0, 0x90 }; memcpy(p + 1, &f, 4);
             WriteMem(g_base + G->moviePos.rva, p, 8);
@@ -4122,6 +4183,7 @@ static void InstallMovieRenderer(void)
     orig_CoCreate = (CoCreate_t)*(u32*)iat;
     u32 hook = (u32)CoCreate_hook;
     WriteMem(iat, &hook, 4);
+    if (!InstallPlayHook()) dlogf_("movies: play function not recognised, the renderer is not released after a movie");
     logf_("movies: MPC Video Renderer on (loaded at the first movie)");
 }
 
@@ -4321,12 +4383,27 @@ static u32 orig_PlayMovie;
 static int __attribute__((fastcall)) PlayMovie_hook(void* c, const char* file, int a, int b, int d)
 {
     if (g_moviePlayer[0] && file && file[0] && PlayExternal(file)) return 0;
-    return ((PlayMovie_t)orig_PlayMovie)(c, file, a, b, d);
+    int r = ((PlayMovie_t)orig_PlayMovie)(c, file, a, b, d);
+    MovieEnded();
+    return r;
 }
 static int __attribute__((fastcall)) PlayMovie5_hook(void* c, const char* file, int a, int b, int d, int e, int f)
 {
     if (g_moviePlayer[0] && file && file[0] && PlayExternal(file)) return 0;
-    return ((PlayMovie5_t)orig_PlayMovie)(c, file, a, b, d, e, f);
+    int r = ((PlayMovie5_t)orig_PlayMovie)(c, file, a, b, d, e, f);
+    MovieEnded();
+    return r;
+}
+static int InstallPlayHook(void)
+{
+    if (orig_PlayMovie) return 1;
+    u32 at = g_base + G->playCall;
+    if (!G->playCall || *(uint8_t*)at != 0xe8 || at + 5 + *(int32_t*)(at + 1) != g_base + G->playFn) return 0;
+    orig_PlayMovie = g_base + G->playFn;
+    u32 hook = G->playArgs == 5 ? (u32)PlayMovie5_hook : (u32)PlayMovie_hook;
+    uint8_t c[5] = { 0xe8 }; int32_t rel = (int32_t)(hook - (at + 5)); memcpy(c + 1, &rel, 4);
+    WriteMem(at, c, 5);
+    return 1;
 }
 
 static void InstallExternalPlayer(const char* opt)
@@ -4344,14 +4421,7 @@ static void InstallExternalPlayer(const char* opt)
         g_moviePlayer[0] = 0; return;
     }
     // call <play movie>  ->  call PlayMovie_hook
-    u32 at = g_base + G->playCall;
-    if (*(uint8_t*)at != 0xe8 || at + 5 + *(int32_t*)(at + 1) != g_base + G->playFn) {
-        logf_("movies: movie code not recognised, external player off"); g_moviePlayer[0] = 0; return;
-    }
-    orig_PlayMovie = g_base + G->playFn;
-    u32 hook = G->playArgs == 5 ? (u32)PlayMovie5_hook : (u32)PlayMovie_hook;
-    uint8_t c[5] = { 0xe8 }; int32_t rel = (int32_t)(hook - (at + 5)); memcpy(c + 1, &rel, 4);
-    WriteMem(at, c, 5);
+    if (!InstallPlayHook()) { logf_("movies: movie code not recognised, external player off"); g_moviePlayer[0] = 0; return; }
     logf_("movies: external player %s", g_moviePlayer);
 }
 
@@ -4491,8 +4561,8 @@ static void InstallFpsLimit(void)
         if (dm.dmPelsWidth == rw && dm.dmPelsHeight == rh && dm.dmDisplayFrequency > best) best = dm.dmDisplayFrequency;
     }
     if (!best) best = bestAny;
-    static const u32 kSettings[2][3] = { { 0x5720, 0x57F0, 0x5BB0 }, { 0x40ED0, 0x42B40, 0x40310 } };   // get, set, store
-    const u32* fn = kSettings[G->build == 6401 ? 0 : 1];
+    static const u32 kSettings[3][3] = { { 0x5720, 0x57F0, 0x5BB0 }, { 0x40ED0, 0x42B40, 0x40310 }, { 0x6BF60, 0x6DBC0, 0x6B3A0 } };   // get, set, store
+    const u32* fn = kSettings[BuildIdx()];
     if (best > rr && (int)rr < g_fpsLimit && best < 1000) {
         typedef u32 (__cdecl *GetSettings_t)(void);
         typedef int (__thiscall *SetInt_t)(u32, int, int);
@@ -4522,9 +4592,9 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.14  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.15  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
-    if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401 or 1.27b / 7085)"); return; }
+    if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401, 1.27b / 7085 or 1.28.5 / 7680)"); return; }
     logf_("Warcraft III %s", G->name);
     g_keepVt[0] = VT(SimpleTop); g_keepVt[1] = VT(Cursor);
 

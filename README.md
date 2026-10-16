@@ -1,8 +1,8 @@
-# W3TrueWidescreen: unstretched widescreen for Warcraft III 1.26a and 1.27b
+# W3TrueWidescreen: unstretched widescreen for Warcraft III 1.26a, 1.27b and 1.28.5
 
 *[Русская версия](README.ru.md)*
 
-W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Throne, patches **1.26a** and **1.27b**) look right on 16:9, 16:10 and ultrawide screens. It keeps the game's original look: nothing is stretched, redrawn or replaced.
+W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Throne, patches **1.26a**, **1.27b** and **1.28.5**) look right on 16:9, 16:10 and ultrawide screens. It keeps the game's original look: nothing is stretched, redrawn or replaced.
 
 ## What it does
 
@@ -24,7 +24,7 @@ W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Thr
 
 ## Requirements
 
-- Warcraft III **1.26a** (Game.dll version 1.26.0.6401) or **1.27b** (1.27.1.7085). The mod checks the version and does nothing on any other patch.
+- Warcraft III **1.26a** (Game.dll version 1.26.0.6401), **1.27b** (1.27.1.7085) or **1.28.5** (1.28.5.7680). The mod checks the version and does nothing on any other patch.
 - Direct3D renderer (the default). The mod also works with dgVoodoo2. OpenGL mode (`-opengl`) is not supported: the console backing is skipped there.
 - The optional movie renderer was tested on Windows 11 with an NVIDIA RTX card; RTX super resolution needs an NVIDIA RTX card (the rest works on any modern GPU).
 
@@ -72,7 +72,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 
 `W3TrueWidescreen.log` in the game folder says what the mod did:
 
-- `unsupported game version`: this is neither 1.26a nor 1.27b.
+- `unsupported game version`: this is not 1.26a, 1.27b or 1.28.5.
 - `WARNING: window is ...`: the window size does not match the resolution in the settings. Set `Width`/`Height` in the ini.
 - `aspect is 4:3 or narrower`: on a 4:3 screen the interface and view stay as they are; the movie options and `FpsLimit` still work.
 - `movies: ...`: what the movie renderer did. If the movies misbehave, set `MovieRenderer=0` to fall back to the Windows renderer.
@@ -103,6 +103,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.15** — Warcraft III 1.28.5 support.
 - **1.14** — Battle.net screens: the login doors reach the screen edges (no black areas beside them); the side panels of the chat, standard game, profile and team screens are widened like the other two-panel screens, with their contents; the top bar is extended to the screen edges with its own metalwork. `MenuLayout=0` now shows the menus as the original game does (stretched), with the 3D background unstretched. `FpsLimit`: the game's fullscreen refresh rate setting is raised to the monitor's highest rate when it would cap the frame rate (no more registry editing). The black area under the console now also works with Direct3D 8 wrappers and overlays. The time of day clock shows with `UIScale` above 100; multiboards and leaderboards are no longer pushed up with the world. The loading screen of DotA 6.8x maps is no longer stretched.
 - **1.13** — `HideUIKey` (Ctrl+H by default): hides the whole interface in a game, including health bars and selection circles, for screenshots. New menu layout `MenuLayout=3`, the new default: as 2, but on the custom game screen the panels' contents stay centred in the widened panels. Clicks on the raised frames of the minimap and the command card no longer reach the world behind them.
 - **1.12** — Clicks on the console's and top bar's artwork no longer reach the world behind them (with `WorldFullHeight=1` the world is also drawn there, and such a click selected or ordered units under the console); beside the console and the top bar the world still takes clicks. The frame around the minimap on the loading screen of melee maps now fits the map with `LoadingFullScreen=1` and `UIScale` (it was stretched into a rectangle, or larger than the map).
