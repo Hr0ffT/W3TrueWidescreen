@@ -70,8 +70,8 @@ typedef struct {
     Code setFramePoint, setAllPoints, setAbsPoint;
     u32 clearAllPoints, setWidth, setHeight, screenRootSlot1;
     // the UI width / height operands
-    u32 widthSites[12], widthConst;  // operands (addresses) pointing at the 0.8 constant: "UI width"
-    u32 heightSites[8], heightConst; // the same for 0.6: "UI height" (UIScale)
+    u32 widthSites[16], widthConst;  // operands (addresses) pointing at the 0.8 constant: "UI width"
+    u32 heightSites[12], heightConst; // the same for 0.6: "UI height" (UIScale)
     int orthoImm;                    // 1: ortho edges are immediates (mov [esp+n], 0.8f), 0: fld [const] operands
     u32 orthoW, orthoWConst, orthoH, orthoHConst;
     u32 pickTop, pickTopConst;       // map-click gate operand (0.577f)
@@ -172,8 +172,11 @@ static const GameAddrs kGames[] = {
     { 0x13FC20, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" }, { 0x13FAD0, 5, "\x55\x8B\xEC\x56\x57" }, { 0x13FBB0, 7, "\x55\x8B\xEC\x53\x8B\x5D\x08" },
     0x13F020, 0x13FCE0, 0x13FB40, 0x14C6A0,
     { 0x867F18, 0x867F29, 0x867F70, 0x867FB8, 0x867FD8, 0x867FE9, 0x868030, 0x868078,
-      0x3F5B7D, 0x2E80C7, 0x335923 }, 0xA7CF34,
-    { 0x867F3B, 0x867F4D, 0x867F85, 0x867FA8, 0x867FFB, 0x86800D, 0x868045, 0x868068 }, 0xA7CF30,
+      0x3F5B7D, 0x2E80C7, 0x335923,
+      0x13EBA1, 0x13EBA9, 0x13EF50 }, 0xA7CF34,     // (1.28.5 only: UI -> normalized copies near the frame code; the
+                                                    //  minimap's mouse position among them)
+    { 0x867F3B, 0x867F4D, 0x867F85, 0x867FA8, 0x867FFB, 0x86800D, 0x868045, 0x868068,
+      0x13EB89, 0x13EBBB, 0x13EF65 }, 0xA7CF30,
     1, 0x1C5DF6, 0x3F4CCCCD, 0x1C5DE6, 0x3F19999A,
     0x3B829E, 0xAAC330,
     0xAAA730, 0xAAA818, 0xA7CBCC, 0xA7D51C, 0xA7AD14, 0xAA14D0, 0xAA298C, 0xAAF1C4, 0xAAE290,
@@ -276,7 +279,13 @@ static int IsKeepClass(u32 frame)
 }
 
 // menus: 3D backgrounds (CSpriteFrame) fill the whole screen, the menu panels stay centered
-static int g_menuBgFull = 1;
+static double g_menuAspectOpt = 0.0; static float g_menuCut = 0.0f;
+static void MenuClipPoll(void);
+static void MenuClipAddFrame(u32 layout);
+static int IsNarrowed(u32 f);
+static void SfWrapVtable(u32 vt, const char* what);
+static int g_loadingActive, g_scoreActive;  // MenuAspect: how far the menus' screen edges move in from the screen edges on each side
+static int g_menuBgFull = 1;   // 0: 3D menu backgrounds stretched as in the original game
 static int g_menuEdges = 3;   // MenuLayout: 1 = menu panels at the screen edges, 2 = also widened towards the centre,
                               // 3 = as 2, but the custom game screen's contents stay centred in its panels
 static int g_menuWide = 0;    // MenuLayout=2 in effect (wide screen) // MenuLayout=2: how far the left / right panels' inner edges and
@@ -300,7 +309,7 @@ static int IsKeepClassGlue(u32 frame)
 {
     if (IsKeepClass(frame)) return 1;
     u32 vt = VtRva(frame);
-    if (g_menuBgFull && vt == VT(Sprite)) return 1;               // CSpriteFrame: 3D backgrounds
+    if (vt == VT(Sprite)) return 1;                               // CSpriteFrame: 3D backgrounds
     // screens drawn as one fixed 4:3 picture stay centred: CLoading (loading screen), CScoreScreen (mission score)
     // (CBattleNetMain, the Battle.net login, spans the screen: its doors are widened, see ServeBnetDoors)
     if (g_menuEdges && vt != VT(Loading) && vt != VT(Score)) return 1;
@@ -433,6 +442,8 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
             int keep = isUI ? IsFullWidthFrame(frame, parent - OFS_UI_Frame) : IsKeepClassGlue(frame);
             if (isUI && rel == 0 && y > -0.1f && x < 0.12f && !FromGame((u32)__builtin_return_address(0))) keep = 1;   // map helper: top-left corner group
             float nx = keep ? x : ShiftX(rel, x);
+            if (!isUI && keep && g_menuCut > 0.0f && VtRva(frame) != VT(Sprite) && !IsKeepClass(frame))   // MenuAspect: the menu area's edges
+                nx = rel % 3 == 0 ? x + g_menuCut : rel % 3 == 2 ? x - g_menuCut : x;
             if (isUI && g_worldFull) {
                 u32 w = *(u32*)(parent - OFS_UI_Frame + OFS_UI_World);
                 if (w && frame == w + OFS_UI_Frame) {
@@ -552,6 +563,12 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
     orig_SetAbsPoint(frame, 0, point, nx, y, flag);
 }
 
+// MenuAspect: the menu screens narrowed to the menu area. Sprite frames placed over a whole screen (the campaign
+// screen's 3D scene, the campaign fade, the Battle.net login doors, widened to the screen edges as without
+// MenuAspect) are widened back to the whole screen; sprites placed by a point (logos) stay in the menu area.
+static u32 g_narrowed[32]; static int g_narrowedN;
+static int IsNarrowed(u32 f) { for (int i = 0; i < g_narrowedN && i < 32; i++) if (g_narrowed[i] == f) return 1; return 0; }
+static void AddNarrowed(u32 f) { if (!IsNarrowed(f)) g_narrowed[g_narrowedN++ % 32] = f; }
 static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 flag)
 {
     (void)edx;
@@ -562,15 +579,30 @@ static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 fla
         if (isUI || (g_glue && IsScreenRoot(parent))) {
             int keep = isUI ? IsFullWidthFrame(frame, parent - OFS_UI_Frame) : IsKeepClassGlue(frame);
             if (!keep) dx = g_e;
+            else if (!isUI && VtRva(frame) != VT(Sprite) && !IsKeepClass(frame)) { dx = g_menuCut; if (dx > 0.0f) AddNarrowed(frame); }   // MenuAspect: screens span the menu area only
+            // (not the cursor: its frame is the whole screen, mouse positions are measured in it)
+            if (!isUI && VtRva(frame) != VT(Score) && VtRva(frame) != VT(Loading)) g_scoreActive = 0;   // a menu screen again
             if (g_logCount < 400) { g_logCount++; dlogf_("SetAll   %s child=%08X(vt %06X) parent vt %06X dx=%.4f", isUI ? "UI  " : "GLUE", frame, VtRva(frame), VtRva(parent), dx); }
         }
+    }
+    if (g_enabled && g_menuCut > 0.0f && VtRva(frame) == VT(Sprite) && IsNarrowed(parent)) {
+        dx = -g_menuCut;
+        dlogf_("sprite %08X over a narrowed screen (vt %06X): whole screen again", frame, VtRva(parent));
     }
     float dxL = dx, dxR = -dx;
     // GlueSpriteLayerTopRight (right-hand menu decorations: chains, panel frames, post):
     // its model is authored for a 0.8-wide screen, so slide the whole layer to the right edge.
     if (g_enabled && g_glue && g_menuEdges && ((u32)__builtin_return_address(0) - g_base) == G->retGlueTopRight) {
-        dxL = 2.0f * g_e; dxR = 2.0f * g_e;
+        dxL = 2.0f * g_e - g_menuCut; dxR = dxL;
+        if (g_menuCut > 0.0f) MenuClipAddFrame(frame);
         dlogf_("GlueSpriteLayerTopRight shifted by %.4f", dxL);
+    }
+    // GlueSpriteLayerTopLeft (left-hand menu panels): with MenuAspect to the menu area's left edge
+    static const u32 kRetGlueTopLeft[3] = { 0x57BA63, 0x2E0BEE, 0x313BDE };
+    if (g_enabled && g_glue && g_menuEdges && g_menuCut > 0.0f && ((u32)__builtin_return_address(0) - g_base) == kRetGlueTopLeft[BuildIdx()]) {
+        dxL = g_menuCut; dxR = dxL;
+        MenuClipAddFrame(frame);
+        dlogf_("GlueSpriteLayerTopLeft shifted by %.4f", dxL);
     }
     float dyT = 0.0f, dyB = 0.0f;
     if (g_enabled && g_scaleOn && VtRva(frame) == VT(Loading)) {                 // CLoading: 0.8k x 0.6k, centred
@@ -625,7 +657,12 @@ static void __fastcall Persp_hook(u32 out, u32 edx, float fovY, float aspect, fl
     int isFull = fabsf(aspect - W / Hs) < 4e-3f;                  // full screen (menus, world at full height)
     int isNorm = fabsf(aspect - W / (Hs - WORLD_B0 + WORLD_T0)) < 4e-3f;   // world view between the strips
     int inGame = (GetTickCount() - g_lastWorldTick) < 500;
+    if (!inGame) MenuClipPoll();
     if (g_persLog < 30 && (inGame || g_persLog < 3)) { g_persLog++; dlogf_("persp fov=%.4f aspect=%.4f full=%d norm=%d inGame=%d ret=%06X", fovY, aspect, isFull, isNorm, inGame, (u32)__builtin_return_address(0) - g_base); }
+    if (g_enabled && !g_menuBgFull && !inGame && isFull) {   // MenuBackgroundFull=0: 3D menu backgrounds
+        orig_Persp(out, 0, fovY, 0.8f / H1, zn, zf);                         // stretched as in the original game
+        return;
+    }
     if (g_enabled && g_narrowOn && !inGame && isFull) {             // MenuLayout=0: stretched menus, unstretched 3D background
         orig_Persp(out, 0, fovY, 0.8f / H1, zn, zf);
         float* mm = (float*)out; mm[0] = mm[5] / (float)g_aspect;
@@ -836,30 +873,177 @@ typedef HRESULT (__stdcall *Draw5_t)(u32, u32, u32, u32, u32);
 typedef HRESULT (__stdcall *Draw6_t)(u32, u32, u32, u32, u32, u32);
 typedef HRESULT (__stdcall *Draw7_t)(u32, u32, u32, u32, u32, u32, u32);
 typedef HRESULT (__stdcall *Draw9_t)(u32, u32, u32, u32, u32, u32, u32, u32, u32);
-static Draw4_t o_DP; static Draw5_t o_DPUP; static Draw6_t o_DIP8; static Draw7_t o_DIP9; static Draw9_t o_DIPUP;
-static HRESULT __stdcall h_DP(u32 d, u32 a, u32 b, u32 c) { return UiHiding() ? 0 : o_DP(d, a, b, c); }
-static HRESULT __stdcall h_DPUP(u32 d, u32 a, u32 b, u32 c, u32 e) { return UiHiding() ? 0 : o_DPUP(d, a, b, c, e); }
-static HRESULT __stdcall h_DIP8(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f) { return UiHiding() ? 0 : o_DIP8(d, a, b, c, e, f); }
-static HRESULT __stdcall h_DIP9(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g) { return UiHiding() ? 0 : o_DIP9(d, a, b, c, e, f, g); }
-static HRESULT __stdcall h_DIPUP(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g, u32 h, u32 i)
-    { return UiHiding() ? 0 : o_DIPUP(d, a, b, c, e, f, g, h, i); }
-static void HookSlot(u32* vt, int i, void* fn, void** orig)
+// originals per device vtable: after a movie the renderer DLL can be reloaded elsewhere and make a new device
+typedef struct { u32* vt; void* f[4]; } DrawOrig;
+static DrawOrig g_drawOrig[4]; static int g_drawOrigN;
+static void** DrawOrigOf(u32 dev)
 {
-    if (vt[i] == (u32)fn) return;
-    if (!*orig) *orig = (void*)vt[i];
-    else if (vt[i] != (u32)*orig) return;                  // someone else's hook in between: leave it alone
-    WriteMem((u32)&vt[i], &fn, 4);
+    u32* vt = *(u32**)dev;
+    for (int i = 0; i < g_drawOrigN; i++) if (g_drawOrig[i].vt == vt) return g_drawOrig[i].f;
+    return g_drawOrigN ? g_drawOrig[g_drawOrigN - 1].f : NULL;
 }
+#define o_DP(d, ...)    ((Draw4_t)DrawOrigOf(d)[0])(d, __VA_ARGS__)
+#define o_DIP8(d, ...)  ((Draw6_t)DrawOrigOf(d)[1])(d, __VA_ARGS__)
+#define o_DIP9(d, ...)  ((Draw7_t)DrawOrigOf(d)[1])(d, __VA_ARGS__)
+#define o_DPUP(d, ...)  ((Draw5_t)DrawOrigOf(d)[2])(d, __VA_ARGS__)
+#define o_DIPUP(d, ...) ((Draw9_t)DrawOrigOf(d)[3])(d, __VA_ARGS__)
+// MenuAspect: the menus are drawn only inside the menu area. Parts of the menu models that were off the screen
+// (gears, chains, the panels' outer ends, the Battle.net doors when open) would otherwise show beside it. Every
+// interface draw call in the menus (orthographic projection; the 3D backgrounds use a perspective one and are left
+// alone) gets two user clip planes at the area's edges.
+typedef ULONG (__stdcall *Rel_t2)(u32);
+static int g_menuClipD9; static DWORD g_sfThread;
+static int MenuClipWanted(void)
+{
+    return g_menuCut > 0.0f && g_enabled && !g_loadingActive && !g_scoreActive && GetTickCount() - g_lastWorldTick > 500;
+}
+// which draws to cut: those made while one of the menu panel layers is being drawn. Every virtual method of the
+// sprite frame class (both of its vtables) is wrapped: on entry the frame (`this`) goes on a small shadow stack and the
+// return address is swapped for a stub that pops it again, so any argument count and calling convention passes
+// through unchanged. A draw call is cut when one of the panel layers is on that stack. Backgrounds (also sprite
+// frames, but other objects), fades, the cursor and the rest are left whole.
+static u32 g_clipFrames[8]; static int g_clipFrameN;
+static struct { u32 self, ret; } g_sfStack[64]; static int g_sfDepth;
+static void MenuClipAddFrame(u32 layout)
+{
+    for (int i = 0; i < g_clipFrameN; i += 2) if (g_clipFrames[i] == layout) return;
+    if (g_clipFrameN >= 8) { memmove(g_clipFrames, g_clipFrames + 2, 6 * sizeof(u32)); g_clipFrameN = 6; }   // the latest four layers
+    g_clipFrames[g_clipFrameN++] = layout; g_clipFrames[g_clipFrameN++] = layout - OFS_UI_Frame;
+    if (!g_sfThread) g_sfThread = GetCurrentThreadId();
+    // the frame object starts 0xB4 before its layout part: its own vtable (the frame methods, drawing among them)
+    // and the layout part's
+    u32 obj = layout - OFS_UI_Frame;
+    if (IsBadReadPtr((void*)obj, 0x1B0)) return;
+    SfWrapVtable(*(u32*)obj, "the sprite frame");
+    SfWrapVtable(*(u32*)layout, "the sprite frame layout");
+}
+static int InClipFrame(void)
+{
+    // the innermost sprite frame being drawn decides: a layer can draw other sprite frames (3D scenes, models placed
+    // on it) from inside its own methods, and those stay whole
+    if (g_sfDepth <= 0) return 0;
+    u32 v = g_sfStack[g_sfDepth - 1].self;
+    for (int i = 1; i < g_clipFrameN; i += 2) if (v - g_clipFrames[i] < 0x1B0) return 1;
+    return 0;
+}
+extern void SfExitStub(void);
+void __stdcall SfEnter(u32* retSlot, u32 self)
+{
+    if (g_sfDepth >= 64 || GetCurrentThreadId() != g_sfThread) return;          // (too deep: leave this call unwrapped)
+    g_sfStack[g_sfDepth].self = self; g_sfStack[g_sfDepth].ret = *retSlot; g_sfDepth++;
+    *retSlot = (u32)SfExitStub;
+}
+u32 __stdcall SfLeave(void) { return g_sfDepth > 0 ? g_sfStack[--g_sfDepth].ret : 0; }
+__asm__(".globl _SfExitStub\n_SfExitStub:\n"
+        "  sub $4, %esp\n  push %eax\n  push %edx\n  push %ecx\n"
+        "  call _SfLeave@0\n  mov %eax, 12(%esp)\n"
+        "  pop %ecx\n  pop %edx\n  pop %eax\n  ret\n");
+static void SfWrapVtable(u32 vt, const char* what)
+{
+    static u32 done[8]; static int nd;
+    if (!vt || vt < g_base || IsBadReadPtr((void*)vt, 4)) return;
+    for (int i = 0; i < nd; i++) if (done[i] == vt) return;
+    if (nd >= 8) return;
+    done[nd++] = vt;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(g_base + ((IMAGE_DOS_HEADER*)g_base)->e_lfanew);
+    u32 lo = g_base + nt->OptionalHeader.BaseOfCode, hi = lo + nt->OptionalHeader.SizeOfCode;
+    int n = 0; while (n < 96 && !IsBadReadPtr((void*)(vt + n * 4), 4) && *(u32*)(vt + n * 4) >= lo && *(u32*)(vt + n * 4) < hi) n++;
+    uint8_t* code = (uint8_t*)VirtualAlloc(NULL, n * 32 + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!code || !n) return;
+    for (int i = 0; i < n; i++) {
+        uint8_t* t = code + i * 32; u32 orig = *(u32*)(vt + i * 4);
+        // lea eax,[esp] / push ecx / push ecx / push eax / call SfEnter / pop ecx / jmp orig
+        int k = 0;
+        t[k++] = 0x8D; t[k++] = 0x04; t[k++] = 0x24;
+        t[k++] = 0x51; t[k++] = 0x51; t[k++] = 0x50;
+        t[k++] = 0xE8; *(u32*)(t + k) = (u32)SfEnter - (u32)(t + k + 4); k += 4;
+        t[k++] = 0x59;
+        t[k++] = 0xE9; *(u32*)(t + k) = orig - (u32)(t + k + 4); k += 4;
+        u32 np = (u32)t; WriteMem(vt + i * 4, &np, 4);
+    }
+    logf_("menus: %d methods of %s wrapped (vtable %06X)", n, what, vt - g_base);
+}
+static DWORD g_clipStatT; static int g_clipStat[3];
+static int MenuClipBegin(u32 dev)
+{
+    if (!MenuClipWanted()) return 0;
+    u32* vt = *(u32**)dev; int d9 = g_menuClipD9;
+    typedef HRESULT (__stdcall *GetT_t)(u32, u32, float*);
+    typedef HRESULT (__stdcall *SetCP_t)(u32, u32, const float*);
+    typedef HRESULT (__stdcall *SetRS_t)(u32, u32, u32);
+    typedef HRESULT (__stdcall *GetVS_t)(u32, u32*);
+    float V[16], P[16];
+    if (g_debug) { g_clipStat[0]++; DWORD t = GetTickCount(); if (t - g_clipStatT > 5000) { g_clipStatT = t;
+        dlogf_("menu clip: %d draws, %d in panel layers, %d cut (%d layer frames)", g_clipStat[0], g_clipStat[1], g_clipStat[2], g_clipFrameN / 2);
+        g_clipStat[0] = g_clipStat[1] = g_clipStat[2] = 0; } }
+    if (!InClipFrame()) return 0;
+    if (g_debug) g_clipStat[1]++;
+    if (((GetT_t)vt[d9 ? 45 : 38])(dev, 3, P) != S_OK) return 0;
+    float xl = -1.0f + 2.0f * g_menuCut / g_uiW_f, xr = -xl;
+    float pl[4], pr[4];
+    u32 vs = 0;
+    if (d9) ((GetVS_t)vt[93])(dev, &vs);
+    if (vs) {                                                                        // shaders: planes in clip space
+        pl[0] = 1; pl[1] = 0; pl[2] = 0; pl[3] = -xl; pr[0] = -1; pr[1] = 0; pr[2] = 0; pr[3] = xr;
+        ((Rel_t2)(*(u32**)vs)[2])(vs);
+    } else {                                                                         // fixed function: world space
+        if (((GetT_t)vt[d9 ? 45 : 38])(dev, 2, V) != S_OK) return 0;
+        float M[16];
+        for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
+            float a = 0; for (int k = 0; k < 4; k++) a += V[r * 4 + k] * P[k * 4 + c]; M[r * 4 + c] = a; }
+        for (int k = 0; k < 4; k++) { pl[k] = M[k * 4 + 0] - xl * M[k * 4 + 3]; pr[k] = xr * M[k * 4 + 3] - M[k * 4 + 0]; }
+    }
+    ((SetCP_t)vt[d9 ? 55 : 48])(dev, 0, pl);
+    ((SetCP_t)vt[d9 ? 55 : 48])(dev, 1, pr);
+    ((SetRS_t)vt[d9 ? 57 : 50])(dev, 152, 3);                                        // D3DRS_CLIPPLANEENABLE
+    if (g_debug) g_clipStat[2]++;
+    return 1;
+}
+static void MenuClipEnd(u32 dev, int on)
+{
+    typedef HRESULT (__stdcall *SetRS_t)(u32, u32, u32);
+    if (on) ((SetRS_t)(*(u32**)dev)[g_menuClipD9 ? 57 : 50])(dev, 152, 0);
+}
+static HRESULT __stdcall h_DP(u32 d, u32 a, u32 b, u32 c)
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DP(d, a, b, c); MenuClipEnd(d, k); return r; }
+static HRESULT __stdcall h_DPUP(u32 d, u32 a, u32 b, u32 c, u32 e)
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DPUP(d, a, b, c, e); MenuClipEnd(d, k); return r; }
+static HRESULT __stdcall h_DIP8(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f)
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DIP8(d, a, b, c, e, f); MenuClipEnd(d, k); return r; }
+static HRESULT __stdcall h_DIP9(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g)
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DIP9(d, a, b, c, e, f, g); MenuClipEnd(d, k); return r; }
+static HRESULT __stdcall h_DIPUP(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g, u32 h, u32 i)
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DIPUP(d, a, b, c, e, f, g, h, i); MenuClipEnd(d, k); return r; }
 static void HideUiInstall(const RenderDev* rd)
 {
     u32* vt = *(u32**)rd->dev;
     int d9 = rd->clear == 43;                               // Direct3D 9 (1.27) or 8 (1.26)
+    g_menuClipD9 = d9;
     int dp = d9 ? 81 : 70;                                  // DrawPrimitive, DrawIndexedPrimitive, ...UP, ...IndexedUP
     if (IsBadReadPtr(vt, (dp + 4) * 4)) return;
-    HookSlot(vt, dp, (void*)h_DP, (void**)&o_DP);
-    if (d9) HookSlot(vt, dp + 1, (void*)h_DIP9, (void**)&o_DIP9); else HookSlot(vt, dp + 1, (void*)h_DIP8, (void**)&o_DIP8);
-    HookSlot(vt, dp + 2, (void*)h_DPUP, (void**)&o_DPUP);
-    HookSlot(vt, dp + 3, (void*)h_DIPUP, (void**)&o_DIPUP);
+    for (int i = 0; i < g_drawOrigN; i++) if (g_drawOrig[i].vt == vt) return;     // hooked already
+    if (g_drawOrigN >= 4) return;
+    void* fn[4] = { (void*)h_DP, d9 ? (void*)h_DIP9 : (void*)h_DIP8, (void*)h_DPUP, (void*)h_DIPUP };
+    for (int i = 0; i < 4; i++) if (vt[dp + i] == (u32)fn[i]) return;          // (another vtable copy with ours in it)
+    DrawOrig* o = &g_drawOrig[g_drawOrigN];
+    o->vt = vt;
+    for (int i = 0; i < 4; i++) o->f[i] = (void*)vt[dp + i];
+    g_drawOrigN++;
+    for (int i = 0; i < 4; i++) WriteMem((u32)&vt[dp + i], &fn[i], 4);
+}
+static void MenuClipPoll(void)
+{
+    if (g_menuCut <= 0.0f) return;
+    RenderDev rd;
+    if (!GetRenderDevice(&rd)) return;
+    HideUiInstall(&rd);
+    static int logged; if (!logged) { logged = 1; logf_("menus: drawn inside the menu area only (Direct3D %d)", g_menuClipD9 ? 9 : 8); }
+    static u32 lastDev, lastVt, lastSlot;
+    u32* vt = *(u32**)rd.dev; int dp = g_menuClipD9 ? 81 : 70;
+    if (rd.dev != lastDev || (u32)vt != lastVt || vt[dp + 1] != lastSlot) {
+        lastDev = rd.dev; lastVt = (u32)vt; lastSlot = vt[dp + 1];
+        logf_("menus: device %08X vtable %08X draw %08X (ours %08X / %08X)", rd.dev, (u32)vt, vt[dp + 1], (u32)h_DIP8, (u32)h_DIP9);
+    }
 }
 // the selection circles are drawn with the world: hide them the way the native EnableSelect(true, false) does
 // (selection itself keeps working); afterwards the selection UI flag gets back the value it had
@@ -1039,6 +1223,10 @@ static double ReadAspect(char* src, size_t srcLen)
     g_glue = GetPrivateProfileIntA(INI_SECTION, "Menus", 1, ini);
     g_menuBgFull = GetPrivateProfileIntA(INI_SECTION, "MenuBackgroundFull", 1, ini);
     g_menuEdges = GetPrivateProfileIntA(INI_SECTION, "MenuLayout", 3, ini);
+    { char k[32]; GetPrivateProfileStringA(INI_SECTION, "MenuAspect", "", k, sizeof k, ini);   // e.g. 16:9 or 1.78
+      int aw = 0, ah = 0; double v = 0;
+      if (sscanf(k, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) v = (double)aw / ah; else v = atof(k);
+      g_menuAspectOpt = v; }
     g_worldFull = GetPrivateProfileIntA(INI_SECTION, "WorldFullHeight", 1, ini);
     g_heroEdge = GetPrivateProfileIntA(INI_SECTION, "HeroBarEdge", 1, ini);
     g_cineFull = GetPrivateProfileIntA(INI_SECTION, "CinematicFullWidth", 1, ini);
@@ -1311,7 +1499,7 @@ static void DotAModeCheckExit(u32 parent)
 // The script is also read when a map is only selected in the menus (lobby settings): remember the result and switch
 // when that map's loading screen (CLoading) is laid out; back to normal when its score screen (CScoreScreen)
 // appears, or at the menus if a game ends without one.
-static int g_dotaPending, g_loadingActive;
+static int g_dotaPending;
 static void SetDotAPending(int found)
 {
     g_dotaPending = found;
@@ -1326,7 +1514,7 @@ static void DotAFrameEvent(u32 frame, u32 parent)
         if (!g_scaleOn && !(g_dotaPending && g_dotaOrig)) SetUIScaleActive(1);
         g_loadingActive = 1; g_dotaLoading = g_dotaPending;
     } else if (vt == VT(Score)) {                                     // CScoreScreen
-        g_loadingActive = 0; g_dotaLoading = 0;
+        g_loadingActive = 0; g_dotaLoading = 0; g_scoreActive = 1;
         if (g_dotaMode) SetDotAMode(0);
         if (g_dotaRun) SetDotARun(0);
     }
@@ -2007,7 +2195,6 @@ static void SsSetQuad(uint8_t* g, DWORD sz, float x0, float x1, float y0, float 
     *m = mat;
 }
 
-static const char* const kSsTex[4] = { "RF1", "RF2", "LF1", "LF2" };
 #define SS_TEXDIR "UI\\Glues\\ScoreScreen\\ScoreScreen-Background\\W3TW-ScoreSide-"
 
 // the model with the extended sheet; texW: widths of the RF / LF textures, wt / wl as in SsBuild
@@ -2015,36 +2202,6 @@ static const char* const kSsTex[4] = { "RF1", "RF2", "LF1", "LF2" };
 // u range in texels of a texture tw wide, v range in texel rows
 typedef struct { int mat; float x0, x1; int top; float u0, u1, v0, v1, tw; } SsQuad;
 static uint8_t* SsBuildModelQ(const uint8_t* d, DWORD n, const SsQuad* q, int nq, const char (*tex)[16], int ntex, DWORD* outN);
-
-static uint8_t* SsBuildModel(const uint8_t* d, DWORD n, float e, int wt, int wl, int rfW, int lfW, DWORD* outN)
-{
-    if (n < 16 || memcmp(d, "MDLX", 4)) return NULL;
-    const float K = 0.4f / 512;
-    // quads: tex/material, x0, x1, top-tile?, u0, u1 (texels), v0, v1 (texel rows), texture width
-    SsQuad q[16];
-    int nq = 0;
-    #define SQ(m_, a_, b_, t_, c_, d_, e_, f_, w_) q[nq++] = (SsQuad){ m_, a_, b_, t_, c_, d_, e_, f_, w_ }
-    float lu1 = (float)SS_LFW(wl);
-    // originals (geosets 0..3, in place)
-    SQ(0, SS_LPW * K, 0.4f, 1, SS_LPW, 512, 0, 512, 512);
-    SQ(1, 0.4f, 0.4f + (SS_CR - SS_PW) * K, 1, 0, SS_CR - SS_PW, 0, 512, 512);
-    SQ(2, SS_LPW * K, 0.4f, 0, SS_LPW, 512, 0, 256, 512);
-    SQ(3, 0.4f, 0.4f + (SS_CR - SS_PW) * K, 0, 0, SS_CR - SS_PW, 0, 256, 512);
-    // added
-    const float gw = (512 - SS_CR) * K;
-    SQ(1, 0.8f + e - gw, 0.8f + e, 1, SS_CR, 512, 0, 512, 512);
-    SQ(1, -e, -e + gw, 1, 512, SS_CR, 0, 512, 512);
-    SQ(5, 0.4f + (SS_CR - SS_PW) * K, 0.8f + e - gw, 1, 0, SS_RFW(wt), 0, 512, rfW);
-    SQ(7, -e + gw, SS_LPW * K, 1, 0, lu1, 0, 512, lfW);
-    SQ(3, 0.8f + e - gw, 0.8f + e, 0, SS_CR, 512, 0, 256, 512);
-    SQ(3, -e, -e + gw, 0, 512, SS_CR, 0, 256, 512);
-    SQ(6, 0.4f + (SS_CR - SS_PW) * K, 0.8f + e - gw, 0, 0, SS_PW + wt, 0, 256, rfW);
-    SQ(8, -e + gw, SS_LPW * K, 0, 0, lu1, 0, 256, lfW);
-    #undef SQ
-    char tex[4][16];
-    for (int i = 0; i < 4; i++) snprintf(tex[i], 16, "%s", kSsTex[i]);
-    return SsBuildModelQ(d, n, q, nq, (const char (*)[16])tex, 4, outN);
-}
 
 // the model with quads q (the first four replace the original tiles' geosets) and textures 5.. named by tex
 static uint8_t* SsBuildModelQ(const uint8_t* d, DWORD n, const SsQuad* q, int nq, const char (*tex)[16], int ntex, DWORD* outN)
@@ -2219,6 +2376,63 @@ static float* SsCompose2(const SsGen* G, int wt, const float* rf, const float* l
     return E;
 }
 
+// variant 1 as one composed picture in the layout of variant 2 (SS_V2W(wt) wide, 1 texel = one texel of the sheet):
+// mirrored right border group, left filler, the original sheet, right filler, right border group
+static float* SsCompose1(const SsGen* G, int wt, int wl, const float* rf, const float* lf)
+{
+    const float* L = G->L; const float* R = G->R;
+    const int W = SS_V2W(wt), g = 512 - SS_CR, lw = SS_LFW(wl), rw = SS_RFW(wt);
+    float* E = (float*)malloc(sizeof(float) * 3 * (size_t)SS_ROWS * W);
+    if (!E) return NULL;
+    for (int r = 0; r < SS_ROWS; r++)
+        for (int X = 0; X < W; X++) {
+            const float* src; int x = X;
+            if (x < g) src = &R[((size_t)r * 512 + 511 - x) * 3];
+            else if ((x -= g) < lw) src = &lf[((size_t)r * lw + x) * 3];
+            else if ((x -= lw) < 512 - SS_LPW) src = &L[((size_t)r * 512 + SS_LPW + x) * 3];
+            else if ((x -= 512 - SS_LPW) < SS_CR - SS_PW) src = &R[((size_t)r * 512 + x) * 3];
+            else if ((x -= SS_CR - SS_PW) < rw) src = &rf[((size_t)r * rw + x) * 3];
+            else src = &R[((size_t)r * 512 + SS_CR + (x - rw)) * 3];
+            memcpy(&E[((size_t)r * W + X) * 3], src, 12);
+        }
+    return E;
+}
+// the light of the parchment: the original sheet is lit brighter in its middle and darker towards its edges. On a
+// wide screen the extended sheet would keep that bright middle as a 4:3 patch; the low-frequency light of the
+// original is stretched over the whole width instead and laid on the composed picture (plain parchment rows only)
+static void SsRelight(float* E, int W, int xa, int xb, const SsGen* G)
+{
+    const float* L = G->L; const float* R = G->R;
+    const int oa = 2, ob = 512 + SS_CR, ow = ob - oa, r0 = SS_B0, r1 = SS_B1, nh = r1 - r0, RX = 48, RY = 40, F = 24;
+    float* lo = (float*)malloc(sizeof(float) * (size_t)nh * ow);
+    float* le = (float*)malloc(sizeof(float) * (size_t)nh * W);
+    float* tmp = (float*)malloc(sizeof(float) * (size_t)(W > nh ? W : nh) * 2 + 64);
+    if (!lo || !le || !tmp) { free(lo); free(le); free(tmp); return; }
+    for (int r = 0; r < nh; r++) {
+        for (int c = 0; c < ow; c++) { int x = oa + c;
+            const float* p = x < 512 ? &L[((size_t)(r0 + r) * 512 + x) * 3] : &R[((size_t)(r0 + r) * 512 + x - 512) * 3];
+            lo[(size_t)r * ow + c] = (p[0] + p[1] + p[2]) / 3; }
+        for (int X = 0; X < W; X++) { const float* p = &E[((size_t)(r0 + r) * W + X) * 3]; le[(size_t)r * W + X] = (p[0] + p[1] + p[2]) / 3; }
+        SsBlurLine(lo + (size_t)r * ow, ow, 1, RX, tmp);
+        SsBlurLine(le + (size_t)r * W + xa, xb - xa, 1, RX, tmp);
+    }
+    for (int c = 0; c < ow; c++) SsBlurLine(lo + c, nh, ow, RY, tmp);
+    for (int X = xa; X < xb; X++) SsBlurLine(le + X, nh, W, RY, tmp);
+    for (int r = 0; r < nh; r++) {
+        float fy = r < F ? (float)r / F : r >= nh - F ? (float)(nh - 1 - r) / F : 1.0f;
+        for (int X = xa; X < xb; X++) {
+            float fx = X - xa < F ? (float)(X - xa) / F : xb - 1 - X < F ? (float)(xb - 1 - X) / F : 1.0f;
+            float cs = (X - xa + 0.5f) * ow / (xb - xa) - 0.5f; int c = (int)cs; if (c < 0) c = 0; if (c > ow - 1) c = ow - 1;
+            float t = lo[(size_t)r * ow + c], cur = le[(size_t)r * W + X];
+            float gn = cur > 1 ? t / cur : 1.0f; gn = gn < 0.6f ? 0.6f : gn > 1.6f ? 1.6f : gn;
+            gn = 1 + (gn - 1) * fx * fy;
+            float* p = &E[((size_t)(r0 + r) * W + X) * 3];
+            for (int k = 0; k < 3; k++) { float v = p[k] * gn; p[k] = v > 255 ? 255 : v; }
+        }
+    }
+    free(lo); free(le); free(tmp);
+}
+
 // the model for variant 2: the composed sheet in tiles of 512 texels (top 512 rows / bottom 256 rows each);
 // texW[i]: the texture widths of the tiles (top and bottom of a column share it)
 static uint8_t* SsBuildModel2(const uint8_t* d, DWORD n, float e, int wt, const int* texW, DWORD* outN)
@@ -2289,20 +2503,9 @@ static uint8_t* ExtendScoreBackground(HANDLE mpq, DWORD scope, const uint8_t* mo
     }
     char dir[MAX_PATH], path[MAX_PATH]; SsCacheDir(dir);
     if (ok) SsBuild(G, wt, wl, variant != 2, rf, lf);
-    if (ok && variant != 2) {
-        int rfW = 0, lfW = 0;
-        for (int i = 0; i < 4 && ok; i++) {
-            DWORD bn = 0; int W = 0, top = !(i & 1);
-            const float* img = i < 2 ? rf : lf; int iw = i < 2 ? rw : lw;
-            uint8_t* b = SsMakeBlp(img, iw, 0, iw, top ? 0 : 512, top ? 512 : 256, S.pal[top ? 0 : 1], S.hdr[top ? 0 : 1], &bn, &W);
-            snprintf(path, sizeof path, "%s\\ScoreSide-%s.blp", dir, kSsTex[i]);
-            ok = b && SsWrite(path, b, bn);
-            free(b);
-            if (i < 2) rfW = W; else lfW = W;
-        }
-        if (ok) o = SsBuildModel(model, n, e, wt, wl, rfW, lfW, outN);
-    } else if (ok) {
-        E = SsCompose2(G, wt, rf, lf);
+    if (ok) {
+        E = variant != 2 ? SsCompose1(G, wt, wl, rf, lf) : SsCompose2(G, wt, rf, lf);
+        if (E) SsRelight(E, SS_V2W(wt), variant != 2 ? 512 - SS_CR : 0, SS_V2W(wt) - (512 - SS_CR), G);
         const int W = SS_V2W(wt), ncol = (W + 511) / 512;
         int texW[64];
         ok = E && ncol <= 64;
@@ -2340,7 +2543,10 @@ static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDL
     float e = (float)((0.6 * g_aspect - 0.8) * 0.5);
     int ext = 0;
     uint8_t* o = NULL;
-    if (ok) { o = ExtendScoreBackground(mpq, scope, buf, n, e, g_scoreMode == 3 ? 2 : 1, &on); ext = o != NULL; }
+    // ScoreScreen=3 stretches the sheet: past about 21:9 (3x on 32:9) it gets visibly blurred, extend it instead
+    int mode = g_scoreMode == 3 && g_aspect > 2.4 ? 2 : g_scoreMode;
+    if (mode != g_scoreMode) logf_("score screen: the screen is too wide to stretch the sheet, extending it (ScoreScreen=2)");
+    if (ok) { o = ExtendScoreBackground(mpq, scope, buf, n, e, mode == 3 ? 2 : 1, &on); ext = o != NULL; }
     if (ok && !o) o = AddSideGeosets(buf, n, e, 0.10f, &on);
     free(buf);
     if (!o) { logf_("score screen background not adapted"); return 0; }
@@ -2352,7 +2558,7 @@ static int ServeScoreBackground(HANDLE mpq, const char* name, DWORD scope, HANDL
     if (!ok) return 0;
     BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
     if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
-    logf_("score screen background: %s (%d)", !ext ? "sides covered" : g_scoreMode == 3 ? "sheet stretched" : "sheet extended", r);
+    logf_("score screen background: %s (%d)", !ext ? "sides covered" : mode == 3 ? "sheet stretched" : "sheet extended", r);
     return r;
 }
 // ---- melee loading screen: the minimap frame ----------------------------------------------------------------------
@@ -2625,7 +2831,19 @@ static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE
     int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
     S_Close(h);
     if (ok) ok = StretchMdxVertices(buf, n, fx, fy, fy) > 0;
-    if (ok && !_strnicmp(name, kMp, sizeof kMp - 1)) {               // melee: the minimap frame around the minimap
+    // melee: the minimap frame around the minimap. Only on the game's own picture: Battle.net servers and loaders
+    // (Eurobattle.net, ...) put their own artwork under the same names, with the frame elsewhere
+    int stockPic = 0;
+    if (ok && !_strnicmp(name, kMp, sizeof kMp - 1)) {
+        HANDLE t = 0;
+        if (orig_SOpenEx(mpq, "UI\\Glues\\Loading\\Multiplayer\\Loading-TopLeft.blp", scope, &t) && t) {
+            DWORD tn = S_Size(t, NULL); S_Close(t);
+            stockPic = tn != 592622;                                  // (Eurobattle.net's picture; the game's own differs
+                                                                       //  in size between languages)
+            if (!stockPic) logf_("melee loading screen: custom picture (%lu bytes), minimap frame left as it is", tn);
+        }
+    }
+    if (ok && stockPic) {
         DWORD on = 0; uint8_t* o = FixMeleeLoadingBox(buf, n, fx, fy, &on);
         if (o) { free(buf); buf = o; n = on; }
     }
@@ -2689,7 +2907,7 @@ static void MpSplitPlan(int row, int rev, float ex, float* um, float* k)
 static float MenuPanelMove(float in, int right)
 {
     (void)in; (void)right;
-    float m = (float)((0.6 * g_aspect - 0.8) * 0.5);
+    float m = (float)((0.6 * g_aspect - 0.8) * 0.5) - g_menuCut;      // (MenuAspect: up to the narrower menu area)
     return m > 0.0f ? m : 0.0f;
 }
 // geoset sub-chunks: VRTX, UVBS, first bone, material
@@ -3477,7 +3695,7 @@ static int ServeBnetBar(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
     int ok = buf && S_Read(h, buf, n, &got, NULL) && got == n;
     S_Close(h);
     int pieces = 0; DWORD on = 0;
-    uint8_t* o = ok ? AdaptBnetBar(buf, n, g_e, &pieces, &on) : NULL;
+    uint8_t* o = ok ? AdaptBnetBar(buf, n, g_e - g_menuCut, &pieces, &on) : NULL;
     free(buf);
     static char path[MAX_PATH];
     ok = o != NULL;
@@ -3524,6 +3742,28 @@ static BOOL __stdcall SOpenEx_hook(HANDLE mpq, const char* name, DWORD scope, HA
     return orig_SOpenEx(mpq, name, scope, ph);
 }
 
+// ---- text shadows. The text renderer takes a string's shadow offset in screen fractions (x * screen width in
+//      pixels), while the interface passes it in its own units, which only matched on 4:3 (0.8 wide = the screen); on
+//      a wider screen the shadow slides right with the screen width (by 4x on 32:9). The x offset is scaled to 0.8 /
+//      the interface width, the vertical one is already right. ----
+typedef void (__fastcall *TextShadow_t)(u32 str, const u32* color, float* off);
+static TextShadow_t orig_TextShadow;
+static void __fastcall TextShadow_hook(u32 str, const u32* color, float* off)
+{
+    if (!g_enabled || !off || IsBadReadPtr(off, 8)) { orig_TextShadow(str, color, off); return; }
+    float o[2] = { off[0] * (float)(4.0 / 3.0 / g_aspect), off[1] };
+    static int n; if (g_debug && n < 8) { n++; dlogf_("text shadow %.4f %.4f -> %.4f", off[0], off[1], o[0]); }
+    orig_TextShadow(str, color, o);
+}
+static void InstallTextShadow(void)
+{
+    static const Code kTs[3] = { { 0x7B8FE0, 5, "\x56\x8B\xF1\x85\xF6" }, { 0x122720, 6, "\x55\x8B\xEC\x56\x8B\xF1" },
+                                 { 0x150DD0, 6, "\x55\x8B\xEC\x56\x8B\xF1" } };
+    const Code* c = &kTs[BuildIdx()];
+    if (!CodeIs(c)) { logf_("text shadow code not recognised, shadows left as they are"); return; }
+    orig_TextShadow = (TextShadow_t)MakeTrampoline(g_base + c->rva, c->len);
+    if (orig_TextShadow) WriteJmp(g_base + c->rva, (u32)TextShadow_hook);
+}
 static void InstallFadeFix(void)
 {
     // (always installed: also recognises DracoL1ch's DotA maps, see CheckMapScript)
@@ -4592,7 +4832,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.15  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.16  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401, 1.27b / 7085 or 1.28.5 / 7680)"); return; }
     logf_("Warcraft III %s", G->name);
@@ -4678,12 +4918,17 @@ static void Install(void)
         if (orig_RenderWorld) WriteJmp(g_base + G->renderWorld.rva, (u32)RenderWorld_hook);
     } else logf_("world render code not recognised, console backing off");
     InstallFadeFix();
+    InstallTextShadow();
     InstallHealthBarLayer();
     InstallMovieNative();
     InstallMovieRenderer();
     InstallExternalPlayer(g_moviePlayerOpt);
     InstallFpsLimit();
     g_wideD = g_uiW_d; g_wideE = g_e; g_pickTopWide = g_pickTop;
+    if (g_glue && g_menuEdges >= 1 && g_menuAspectOpt > 1.33 && g_aspect > g_menuAspectOpt + 0.01) {
+        g_menuCut = (float)((g_aspect - g_menuAspectOpt) * 0.6 * 0.5);
+        logf_("menus in a centred %.4f area (MenuAspect): edges %.4f in from the screen edges", g_menuAspectOpt, g_menuCut);
+    }
     if (g_glue && g_menuEdges >= 2 && g_aspect > 1.34) g_menuWide = 1;
     g_enabled = 1;
     if (g_glue && !g_menuEdges && g_aspect > 1.34) { g_narrowWant = 1; SetGlueNarrow(1); }

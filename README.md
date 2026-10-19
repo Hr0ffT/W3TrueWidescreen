@@ -54,7 +54,8 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `HeroBarEdge` | 1 | Hero portraits at the left screen edge |
 | `CinematicFullWidth` | 1 | Cutscene letterbox across the full width |
 | `MenuLayout` | 3 | Menu screens: 3 = panels at the screen edges, two-panel screens widened to meet at the centre, the custom game screen's contents centred in its panels; 2 = the same, but those contents move with the panels' inner edges; 1 = panels at the screen edges as they are; 0 = as in the original game (stretched), 3D backgrounds unstretched |
-| `MenuBackgroundFull` | 1 | 3D menu backgrounds over the whole screen (0 = in the centred 4:3 area) |
+| `MenuBackgroundFull` | 1 | 3D menu backgrounds unstretched (0 = stretched as in the original game) |
+| `MenuAspect` | empty | On screens wider than this (e.g. `16:9` on three monitors) the menus stay in a centred area of that shape, the 3D backgrounds still fill the screen. Empty = off |
 | `HideUIKey` | Ctrl+H | Key that hides and shows the whole interface in a game (for screenshots); empty = off |
 | `MovieNativeMode` | 1 | Movies at desktop resolution without the gamma change (0 = original 800×600) |
 | `MovieRenderer` | 1 | Use the movie renderer from the `W3TrueWidescreen` folder if it is there |
@@ -103,6 +104,7 @@ The engine lays out its interface in a virtual 0.8 × 0.6 screen stretched to th
 
 ## Changelog
 
+- **1.16** — `MenuAspect`: on very wide screens (three monitors) the menus can stay in a centred area such as 16:9, with the 3D backgrounds still over the whole screen. `MenuBackgroundFull=0` now works: the 3D menu backgrounds are stretched as in the original game. Text shadows no longer slide to the right on wide screens. Score screen: sharp on very wide screens, without the lighter 4:3 patch in the middle (past about 21:9 the sheet is extended rather than stretched). 1.28.5: the camera frame on the minimap can be dragged to the left edge again. Custom loading pictures of Battle.net servers (Eurobattle.net) are no longer cut up around the minimap.
 - **1.15** — Warcraft III 1.28.5 support.
 - **1.14** — Battle.net screens: the login doors reach the screen edges (no black areas beside them); the side panels of the chat, standard game, profile and team screens are widened like the other two-panel screens, with their contents; the top bar is extended to the screen edges with its own metalwork. `MenuLayout=0` now shows the menus as the original game does (stretched), with the 3D background unstretched. `FpsLimit`: the game's fullscreen refresh rate setting is raised to the monitor's highest rate when it would cap the frame rate (no more registry editing). The black area under the console now also works with Direct3D 8 wrappers and overlays. The time of day clock shows with `UIScale` above 100; multiboards and leaderboards are no longer pushed up with the world. The loading screen of DotA 6.8x maps is no longer stretched.
 - **1.13** — `HideUIKey` (Ctrl+H by default): hides the whole interface in a game, including health bars and selection circles, for screenshots. New menu layout `MenuLayout=3`, the new default: as 2, but on the custom game screen the panels' contents stay centred in the widened panels. Clicks on the raised frames of the minimap and the command card no longer reach the world behind them.
