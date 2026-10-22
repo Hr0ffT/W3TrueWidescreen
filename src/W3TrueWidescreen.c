@@ -284,7 +284,7 @@ static void MenuClipPoll(void);
 static void MenuClipAddFrame(u32 layout);
 static int IsNarrowed(u32 f);
 static void SfWrapVtable(u32 vt, const char* what);
-static int g_loadingActive, g_scoreActive;  // MenuAspect: how far the menus' screen edges move in from the screen edges on each side
+static int g_loadingActive, g_scoreActive, g_customLoadPic; static u32 g_loadMinimap, g_loadMinimapParent, g_loadBar[2], g_loadBarParent[2]; static float g_loadBarX[2], g_loadBarY[2];  // MenuAspect: how far the menus' screen edges move in from the screen edges on each side
 static int g_menuBgFull = 1;   // 0: 3D menu backgrounds stretched as in the original game
 static int g_menuEdges = 3;   // MenuLayout: 1 = menu panels at the screen edges, 2 = also widened towards the centre,
                               // 3 = as 2, but the custom game screen's contents stay centred in its panels
@@ -292,17 +292,18 @@ static int g_menuWide = 0;    // MenuLayout=2 in effect (wide screen) // MenuLay
                                                 // their contents move towards the centre
 // MenuLayout=2: the screens whose panels are widened (CSkirmish, CLoadSavedGameScreen, CLocalMultiplayerJoin /
 // Create / Load, CCustomCampaignMenu, CViewReplayScreen); frames placed on them move with the panels' inner edges
-static const u32 kWideScreens[][7] = {
-    { 0x965534, 0x964DFC, 0x962A44, 0x962924, 0x962BC8, 0x967A60, 0x965644 },   // 1.26a
-    { 0xAB2058, 0xAB1EF8, 0xAB21B8, 0xAB2318, 0xAB247C, 0xAB1D98, 0xAB1C2C },   // 1.27b
-    { 0xAA2294, 0xAA2134, 0xAA23F8, 0xAA2560, 0xAA26C8, 0xAA1FD0, 0xAA1E5C },   // 1.28.5
+// (last: CGameChatroom, the game lobby, whose contents otherwise stay at the panels' outer edges)
+static const u32 kWideScreens[][8] = {
+    { 0x965534, 0x964DFC, 0x962A44, 0x962924, 0x962BC8, 0x967A60, 0x965644, 0x9624D4 },   // 1.26a
+    { 0xAB2058, 0xAB1EF8, 0xAB21B8, 0xAB2318, 0xAB247C, 0xAB1D98, 0xAB1C2C, 0xAB0CA8 },   // 1.27b
+    { 0xAA2294, 0xAA2134, 0xAA23F8, 0xAA2560, 0xAA26C8, 0xAA1FD0, 0xAA1E5C, 0xAA0D94 },   // 1.28.5
 };
 static float MenuPanelMove(float in, int right);
-static int WideScreen(u32 parent)     // 0: no; 1: skirmish; 2: the others
+static int WideScreen(u32 parent)     // 0: no; 1: skirmish; 2: the others; 3: the game lobby
 {
     u32 vt = VtRva(parent);
     const u32* t = kWideScreens[BuildIdx()];
-    for (int i = 0; i < 7; i++) if (vt == t[i]) return i == 0 ? 1 : 2;
+    for (int i = 0; i < 8; i++) if (vt == t[i]) return i == 0 ? 1 : i == 7 ? 3 : 2;
     return 0;
 }
 static int IsKeepClassGlue(u32 frame)
@@ -329,6 +330,7 @@ static float g_pickTop = 0.577f;
 
 static int g_heroEdge = 1;     // HeroBarEdge=1: hero portraits (top-left) hug the left screen edge
 static int g_cineFull = 1;     // CinematicFullWidth=1: cinematic letterbox panel spans the full width
+static double g_cineAspectOpt = 0.0;   // CinematicAspect: the speaker's portrait, name and text stay in a centred area of this shape
 static int IsFullWidthFrame(u32 frame, u32 ui)
 {
     if (IsKeepClass(frame)) return 1;
@@ -367,6 +369,12 @@ static void CheckWindowOnce(void)
 }
 
 static int g_consoleBacking = 1;
+// occupancy marks (COccupUI) above burrows and gold mines: under the console like the health bars
+static const u32 kOccupVt[3] = { 0x93D06C, 0xAC085C, 0xAB1270 };
+static int g_occupUnder;
+static int IsOccupTree(u32 f);
+static void OccupUnder(u32 ui);
+typedef int (__fastcall *FrameShow_t)(u32 self, u32 edx);
 static int g_hpUnder = 1;         // HealthBarsUnderConsole=1: unit health bars drawn under the console panels   // ConsoleBacking=0: do not blacken the console area behind the world (diagnostics)
 
 static void DotAFrameEvent(u32 frame, u32 parent);
@@ -384,11 +392,30 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         dlogf_("cinematic border %08X pinned to both sides (points %u,%u)", frame, point, other);
         return;
     }
+    // CinematicAspect: the frames placed on the full-width cinematic panel (the speaker's portrait, name and text)
+    // move in from its edges to a centred area of that shape; the letterbox borders above keep the whole width
+    if (g_enabled && g_cineFull && g_cineAspectOpt > 1.33 && rel <= 8 && rel % 3 != 1 && VtRva(parent) == VT(CinePanel)) {
+        float cut = (float)((g_uiW_d - g_uiH_d * g_cineAspectOpt) * 0.5);
+        if (cut > 0.0f) {
+            float nx = rel % 3 == 0 ? x + cut : x - cut;
+            dlogf_("cinematic frame %08X (vt %06X) pt=%u rel=%u x=%.4f -> %.4f y=%.4f", frame, VtRva(frame), point, rel, x, nx, y);
+            x = nx;
+        }
+    }
+    // the loading screen's minimap: remembered, so it can be fitted into a custom picture's frame (FitLoadingMinimap),
+    // which is only known when the picture is read, after the minimap has been placed
+    if (g_enabled && VtRva(parent) == VT(Loading) && point == 3 && rel == 3 && fabsf(x - 0.056875f) < 1e-4f && fabsf(y - 0.0425f) < 1e-4f) {
+        g_loadMinimap = frame; g_loadMinimapParent = parent;
+    }
     if (g_enabled && g_scaleOn && VtRva(parent) == VT(Loading)) {        // frames placed on the loading screen
         float k = g_uiH_f / 0.6f;
         if (point == 7 && rel == 7) y += 0.0025f * (k - 1.0f);           // LoadingBarText: on the bar, as the bar moves
         else { x *= k; y *= k; }
         if (point == 6 && rel == 6 && VtRva(frame) == VT(Sprite)) x += 0.4f * (k - 1.0f);   // LoadingBar (model)
+    }
+    if (g_enabled && VtRva(parent) == VT(Loading) && point == rel && (point == 6 || point == 7)) {   // the bar and its text
+        int t = point == 7; g_loadBar[t] = frame; g_loadBarParent[t] = parent; g_loadBarX[t] = x; g_loadBarY[t] = y;
+        if (!t && VtRva(frame) != VT(Sprite)) g_loadBar[0] = 0;
     }
     int ws;
     // Battle.net screens (CBattleNetChatPanel spans the screen): the top area (banner, logo, button bar) goes to the
@@ -418,9 +445,9 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         // left column of the screen: towards the centre; right column: towards the centre, except the bottom right
         // (the button panel there keeps its place)
         // the same moves as the panels' inner ends (skirmish: 0.5 / 0.499, the others: 0.43 / 0.424 in the models)
-        // (MenuLayout=3: on the custom game screen the contents move half as far, so they stay centred in the
-        // widened panels, whose outer edges stay at the screen edges)
-        float h = ws == 1 && g_menuEdges == 3 ? 0.5f : 1.0f;
+        // (MenuLayout=3: on every such screen the contents move half as far, so they stay centred in the widened
+        // panels; the lobby's contents sit at the panels' outer edges, so with MenuLayout=2 they stay there)
+        float h = g_menuEdges == 3 ? 0.5f : ws == 3 ? 0.0f : 1.0f;
         float nx = rel % 3 == 0 ? x + h * MenuPanelMove(ws == 1 ? 0.5f : 0.43f, 0)
                  : (rel % 3 == 2 && rel != 8) ? x - h * MenuPanelMove(ws == 1 ? 0.499f : 0.424f, 1) : x;
         if (g_logCount < 400) { g_logCount++; dlogf_("SetPoint SCRN child=%08X(vt %06X) parent vt %06X pt=%u rel=%u x=%.4f -> %.4f y=%.4f",
@@ -516,6 +543,8 @@ static int __attribute__((noinline)) OverlayPlacement(void)
 
 static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, float y, u32 flag)
 {
+    if (g_debug && g_loadingActive) { static int n; if (n < 40) { n++;
+        dlogf_("loading SetAbsPoint frame %08X (vt %06X) pt=%u x=%.5f y=%.5f", frame, VtRva(frame), point, x, y); } }
     (void)edx;
     u32 ret = (u32)__builtin_return_address(0) - g_base;
     // fixed positions laid out for the 0..0.8 space (info bar inventory, menu dialogs) -> move into the centered area.
@@ -558,6 +587,34 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
             y = -1.0f;
         }
         nx = x;                                                 // (unit bars are never "fixed" positions)
+    }
+    // The occupancy marks above a burrow or a gold mine (COccupUI, workers inside) are placed by their top point and
+    // kept inside the world view's rectangle. With WorldFullHeight that rectangle reaches the screen edges, so the
+    // marks of a building behind the console were drawn over it. They are now drawn under the console like the
+    // health bars (OccupUnder) and follow the same rules: beside the console they move out to its side, over it
+    // they are hidden, as under the top bar
+    if (g_enabled && g_worldFull && point == 1 && VtRva(frame) == kOccupVt[BuildIdx()]) {
+        const float L = g_e, R = g_e + 0.8f;
+        typedef float (__fastcall *GetSize_t)(u32 self, u32 edx);
+        float hw = ((GetSize_t)(*(u32**)frame)[6])(frame, 0) * 0.5f, h = ((GetSize_t)(*(u32**)frame)[7])(frame, 0);
+        if (!(hw > 0.0f && hw < 0.5f)) hw = 0.02f;
+        if (!(h > 0.0f && h < 0.2f)) h = 0.01f;
+        if (g_occupUnder) OccupUnder(frame);
+        float bot = y - h;
+        int hid = 0;
+        if (!g_occupUnder) {
+            if (x + hw > L && x - hw < R && bot < 0.17f) hid = 1;
+        } else if (bot < WORLD_B0 + 0.005f && x + hw > L && x - hw < R) {
+            if (x < L) x = L - hw;                              // mostly beside the console: whole beside it
+            else if (x > R) x = R + hw;
+            else hid = 1;
+        }
+        if (x > L && x < R && y - 0.5f * h > g_uiH_f + WORLD_T0) hid = 1;     // under the top bar
+        if (hid) {
+            static int n; if (n++ < 5) dlogf_("occupancy marks over the console hidden (x %.3f y %.3f)", x, y);
+            y = -1.0f;
+        }
+        nx = x;
     }
     if (fixed && g_logCount < 400) { g_logCount++; dlogf_("AbsPoint child=%08X(vt %06X) pt=%u x=%.4f -> %.4f y=%.4f ret=%06X", frame, VtRva(frame), point, x, nx, y, ret); }
     orig_SetAbsPoint(frame, 0, point, nx, y, flag);
@@ -1227,6 +1284,10 @@ static double ReadAspect(char* src, size_t srcLen)
       int aw = 0, ah = 0; double v = 0;
       if (sscanf(k, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) v = (double)aw / ah; else v = atof(k);
       g_menuAspectOpt = v; }
+    { char k[32]; GetPrivateProfileStringA(INI_SECTION, "CinematicAspect", "", k, sizeof k, ini);   // e.g. 16:9 or 1.78
+      int aw = 0, ah = 0; double v = 0;
+      if (sscanf(k, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) v = (double)aw / ah; else v = atof(k);
+      g_cineAspectOpt = v; }
     g_worldFull = GetPrivateProfileIntA(INI_SECTION, "WorldFullHeight", 1, ini);
     g_heroEdge = GetPrivateProfileIntA(INI_SECTION, "HeroBarEdge", 1, ini);
     g_cineFull = GetPrivateProfileIntA(INI_SECTION, "CinematicFullWidth", 1, ini);
@@ -1542,6 +1603,36 @@ static void DotAFrameEvent(u32 frame, u32 parent)
             u32 ui = g_gameUI;
             if (!(ui && !IsBadReadPtr((void*)ui, 4) && *(u32*)ui == g_base + VT(GameUI))) { g_narrowGameSeen = 0; SetGlueNarrow(1); }
         }
+    }
+}
+// a melee loading picture of a Battle.net server (Eurobattle.net) scaled by UIScale / LoadingFullScreen: its frame
+// around the minimap has chains and a plate attached and can't be moved to the minimap, so the minimap is fitted into
+// the scaled frame instead (square, centred in its inside: texels 72..278 x 227..432 of the top left quad)
+static void FitLoadingMinimap(float fx, float fy)
+{
+    u32 f = g_loadMinimap, p = g_loadMinimapParent;
+    if (!f || !p || IsBadReadPtr((void*)f, 4) || IsBadReadPtr((void*)p, 4) || VtRva(p) != VT(Loading)) return;
+    #define LC_X(t) ((((t) * 0.4f / 512.0f) - 0.4f) * fx + 0.4f * fy)
+    #define LC_Y(t) ((0.6f - (t) * 0.4f / 512.0f) * fy)
+    float x0 = LC_X(72.0f), x1 = LC_X(278.0f), y0 = LC_Y(432.0f), y1 = LC_Y(227.0f);
+    #undef LC_X
+    #undef LC_Y
+    float sd = fminf(x1 - x0, y1 - y0), cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+    // (the minimap frame has its own size, a second point does not resize it)
+    typedef void (__fastcall *SetSize_t)(u32 self, u32 edx, float v);
+    ((SetSize_t)(g_base + G->setWidth))(f, 0, sd);
+    ((SetSize_t)(g_base + G->setHeight))(f, 0, sd);
+    ClearAllPoints(f, 0);
+    orig_SetFramePoint(f, 0, 4, p, 6, cx, cy, 1);
+    logf_("melee loading screen: minimap fitted into the custom picture's frame (%.4f square)", sd);
+    // the loading bar is drawn by its model about 0.06 above its frame (in the bar's slot of the picture), at its own
+    // size: as the picture grows by fy, raise it with the slot (it and its text)
+    float dy = 0.06f * (fy - 1.0f);
+    for (int t = 0; t < 2 && dy > 0.0f; t++) {
+        u32 b = g_loadBar[t], bp = g_loadBarParent[t];
+        if (!b || !bp || IsBadReadPtr((void*)b, 4) || bp != p) continue;
+        u32 pt = t ? 7 : 6;
+        orig_SetFramePoint(b, 0, pt, bp, pt, g_loadBarX[t], g_loadBarY[t] + dy, 1);
     }
 }
 static char g_loadModel[MAX_PATH];        // custom loading screen model of the selected DotA map (from war3map.w3i)
@@ -2833,14 +2924,14 @@ static int ServeWidenedLoading(HANDLE mpq, const char* name, DWORD scope, HANDLE
     if (ok) ok = StretchMdxVertices(buf, n, fx, fy, fy) > 0;
     // melee: the minimap frame around the minimap. Only on the game's own picture: Battle.net servers and loaders
     // (Eurobattle.net, ...) put their own artwork under the same names, with the frame elsewhere
-    int stockPic = 0;
+    int stockPic = 0; g_customLoadPic = 0;
     if (ok && !_strnicmp(name, kMp, sizeof kMp - 1)) {
         HANDLE t = 0;
         if (orig_SOpenEx(mpq, "UI\\Glues\\Loading\\Multiplayer\\Loading-TopLeft.blp", scope, &t) && t) {
             DWORD tn = S_Size(t, NULL); S_Close(t);
             stockPic = tn != 592622;                                  // (Eurobattle.net's picture; the game's own differs
                                                                        //  in size between languages)
-            if (!stockPic) logf_("melee loading screen: custom picture (%lu bytes), minimap frame left as it is", tn);
+            if (!stockPic) { g_customLoadPic = 1; logf_("melee loading screen: custom picture (%lu bytes)", tn); FitLoadingMinimap(fx, fy); }
         }
     }
     if (ok && stockPic) {
@@ -4456,7 +4547,6 @@ static int __fastcall StatBarSetTexture_wrap(u32 self, u32 edx, u32 a1, u32 a2)
 // level in the order they were shown. Unit bars and the console are both top-level (level 0) frames and the
 // console was shown first, so it is drawn under the bars. Whenever a unit bar is shown, move the other
 // top-level frames behind it in that order (the engine's own register call appends at the end).
-typedef int  (__fastcall *FrameShow_t)(u32 self, u32 edx);
 typedef void (__fastcall *TopRegister_t)(u32 top, u32 edx, u32 frame, u32 level);
 static void BarsFirst(void)
 {
@@ -4467,7 +4557,7 @@ static void BarsFirst(void)
     int node = *(int*)(top + 0x194);                            // level 0 list: first node
     while (node > 0 && n < 96 && !IsBadReadPtr((void*)node, 12)) {
         u32 f = *(u32*)(node + 8);
-        if (f && VtRva(f) != VT(StatBar) && f != *(u32*)(top + 0x16C)) others[n++] = f;   // not bars, not the mouse focus
+        if (f && VtRva(f) != VT(StatBar) && f != *(u32*)(top + 0x16C) && !IsOccupTree(f)) others[n++] = f;   // (occupancy marks too)   // not bars, not the mouse focus
         node = *(int*)(node + 4);
     }
     TopRegister_t reg = (TopRegister_t)(g_base + G->topRegister.rva);
@@ -4506,6 +4596,64 @@ static void DumpSimpleLevels(u32 bar)
         if (n) logf_("level %d: %d frames:%s", L, n, buf);
     }
 }
+// ---- occupancy marks (COccupUI: a frame with a background texture, its COccupGrid child at +0x128, whose marks are
+//      status bars, at +0x12C, their count at +0x134) under the console, as the health bars: all of them on the
+//      top level (0) with their fills in the BACKGROUND layer, drawn before the console (BarsFirst)
+static const u32 kOccupTexCall[3] = { 0x362AB7, 0x3CEE44, 0x402F44 };   // a mark's fill: CSimpleStatusBar SetTexture
+static int IsOccupTree(u32 f)
+{
+    for (int i = 0; i < 4 && f && !IsBadReadPtr((void*)f, 0x70); i++) {
+        if (VtRva(f) == kOccupVt[BuildIdx()]) return 1;
+        f = *(u32*)(f + 0x6C);
+    }
+    return 0;
+}
+static int OccupFrames(u32 ui, u32* out, int max)
+{
+    int n = 0;
+    out[n++] = ui;
+    u32 grid = *(u32*)(ui + 0x128);
+    if (!grid || IsBadReadPtr((void*)grid, 0x138)) return n;
+    out[n++] = grid;
+    u32 arr = *(u32*)(grid + 0x12C), cnt = *(u32*)(grid + 0x134);
+    if (!arr || cnt > 64 || IsBadReadPtr((void*)arr, cnt * 4)) return n;
+    for (u32 i = 0; i < cnt && n < max; i++) {
+        u32 c = ((u32*)arr)[i];
+        if (c && !IsBadReadPtr((void*)c, 0x98)) out[n++] = c;
+    }
+    return n;
+}
+static void OccupUnder(u32 ui)
+{
+    u32 f[70]; int n = OccupFrames(ui, f, 70), raised = 0;
+    for (int i = 0; i < n; i++) if (*(u32*)(f[i] + 0x84) != 0) raised = 1;
+    if (!raised) return;
+    int shown = *(u32*)(ui + 0x94);
+    // as the game's SetFrameLevel: hide (the children too), change the levels, show again (registered anew)
+    if (shown) { *(u32*)(ui + 0x90) = 0; ((FrameShow_t)(*(u32**)ui)[0x64 / 4])(ui, 0); }
+    for (int i = 0; i < n; i++) *(u32*)(f[i] + 0x84) = 0;
+    if (shown) { *(u32*)(ui + 0x90) = 1; ((FrameShow_t)(*(u32**)ui)[0x68 / 4])(ui, 0); }
+    static int k; if (k++ < 3) dlogf_("occupancy marks %08X: %d frames moved to the top level", ui, n);
+}
+static int __fastcall OccupShow_hook(u32 self, u32 edx)
+{
+    int wasShown = *(u32*)(self + 0x94);
+    int r = ((FrameShow_t)(g_base + G->frameShow))(self, edx);
+    if (!wasShown && *(u32*)(self + 0x94)) BarsFirst();
+    return r;
+}
+static void InstallOccupUnder(void)
+{
+    u32 at = g_base + kOccupTexCall[BuildIdx()], slot = g_base + kOccupVt[BuildIdx()] + 0x68;
+    if (*(uint8_t*)at != 0xE8 || at + 5 + *(int32_t*)(at + 1) != g_base + G->sbSetTex || *(u32*)slot != g_base + G->frameShow) {
+        logf_("occupancy marks code not recognised"); return;
+    }
+    uint8_t c[5] = { 0xE8 }; int32_t rel = (int32_t)((u32)StatBarSetTexture_wrap - (at + 5)); memcpy(c + 1, &rel, 4);
+    WriteMem(at, c, 5);
+    u32 h = (u32)OccupShow_hook; WriteMem(slot, &h, 4);
+    g_occupUnder = 1;
+    logf_("occupancy marks drawn under the console");
+}
 static void InstallHealthBarLayer(void)
 {
     if (!g_hpUnder || !g_worldFull) return;
@@ -4529,6 +4677,7 @@ static void InstallHealthBarLayer(void)
         }
     } else logf_("health bar order code not recognised");
     logf_("unit health bars drawn under the console");
+    if (*(u32*)slot == (u32)StatBarShow_hook) InstallOccupUnder();
 }
 
 static void InstallMovieNative(void)
@@ -4832,7 +4981,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.16  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.17  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401, 1.27b / 7085 or 1.28.5 / 7680)"); return; }
     logf_("Warcraft III %s", G->name);
