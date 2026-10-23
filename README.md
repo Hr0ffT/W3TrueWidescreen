@@ -51,9 +51,9 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | `UIScale` | 100 | In-game interface size in percent (50..150); menus keep their size |
 | `LoadingFullScreen` | 0 | Loading screen picture over the whole screen (stretched) instead of 4:3 with black bars |
 | `ScoreScreen` | 3 | Score screen background: 1 = original 4:3 with black bars, 2 = sheet extended to both screen edges (border on both sides), 3 = sheet stretched to the width below its header, header and tabs in place |
-| `HeroBarEdge` | 1 | Hero portraits at the left screen edge |
-| `CinematicFullWidth` | 1 | Cutscene letterbox across the full width |
-| `CinematicAspect` | empty | On screens wider than this (e.g. `16:9` on three monitors) the cutscene speaker's portrait, name and text stay in a centred area of that shape, the letterbox keeps the full width. Empty = off |
+| `HeroBarAspect` | empty | Hero portraits at the left edge of a centred area of this shape (e.g. `16:9` on three monitors, `4:3` = next to the console). Empty = the screen edge |
+| `CinematicBarsAspect` | empty | Cutscene letterbox across a centred area of this shape (`4:3` = as in the original game). Empty = the full width |
+| `CinematicDialogueAspect` | empty | The cutscene speaker's portrait, name and text stay in a centred area of this shape (e.g. `16:9`), inside the letterbox. Empty = the letterbox edges |
 | `MenuLayout` | 3 | Menu screens: 3 = panels at the screen edges, two-panel screens widened to meet at the centre, their contents centred in the widened panels; 2 = the same, but the contents move with the panels' inner edges; 1 = panels at the screen edges as they are; 0 = as in the original game (stretched), 3D backgrounds unstretched |
 | `MenuBackgroundFull` | 1 | 3D menu backgrounds unstretched (0 = stretched as in the original game) |
 | `MenuAspect` | empty | On screens wider than this (e.g. `16:9` on three monitors) the menus stay in a centred area of that shape, the 3D backgrounds still fill the screen. Empty = off |

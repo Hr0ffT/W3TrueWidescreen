@@ -328,9 +328,17 @@ static int   g_worldBottomDefault = 0, g_worldTopDefault = 0;
 //      clicks. Point that operand at our own value: no upper gate when the world is full height. ----
 static float g_pickTop = 0.577f;
 
-static int g_heroEdge = 1;     // HeroBarEdge=1: hero portraits (top-left) hug the left screen edge
-static int g_cineFull = 1;     // CinematicFullWidth=1: cinematic letterbox panel spans the full width
-static double g_cineAspectOpt = 0.0;   // CinematicAspect: the speaker's portrait, name and text stay in a centred area of this shape
+static int g_heroEdge = 1;     // hero portraits (top-left) placed from the screen edge (HeroBarAspect sets how far in)
+static int g_cineFull = 1;     // cinematic letterbox panel placed from the screen edges (CinematicBarsAspect sets how far in)
+// aspect ratios of centred areas (0: the whole screen): HeroBarAspect (hero portraits at its left edge),
+// CinematicBarsAspect (the cinematic letterbox), CinematicDialogueAspect (the speaker's portrait, name and text)
+static double g_heroAspect, g_cineBarsAspect, g_cineDlgAspect;
+static float AspectInset(double a)        // how far a centred area of aspect a lies in from each screen edge (UI units)
+{
+    if (a <= 0.0) return 0.0f;
+    float e = (float)((g_uiW_d - g_uiH_d * a) * 0.5);
+    return e > 0.0f ? e : 0.0f;
+}
 static int IsFullWidthFrame(u32 frame, u32 ui)
 {
     if (IsKeepClass(frame)) return 1;
@@ -392,10 +400,10 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
         dlogf_("cinematic border %08X pinned to both sides (points %u,%u)", frame, point, other);
         return;
     }
-    // CinematicAspect: the frames placed on the full-width cinematic panel (the speaker's portrait, name and text)
-    // move in from its edges to a centred area of that shape; the letterbox borders above keep the whole width
-    if (g_enabled && g_cineFull && g_cineAspectOpt > 1.33 && rel <= 8 && rel % 3 != 1 && VtRva(parent) == VT(CinePanel)) {
-        float cut = (float)((g_uiW_d - g_uiH_d * g_cineAspectOpt) * 0.5);
+    // CinematicDialogueAspect: the frames placed on the cinematic panel (the speaker's portrait, name and text) move
+    // in from its edges to a centred area of that shape (inside the letterbox); the letterbox borders keep its width
+    if (g_enabled && g_cineFull && g_cineDlgAspect > 1.33 && rel <= 8 && rel % 3 != 1 && VtRva(parent) == VT(CinePanel)) {
+        float cut = (float)((g_uiW_d - 2.0f * AspectInset(g_cineBarsAspect) - g_uiH_d * g_cineDlgAspect) * 0.5);
         if (cut > 0.0f) {
             float nx = rel % 3 == 0 ? x + cut : x - cut;
             dlogf_("cinematic frame %08X (vt %06X) pt=%u rel=%u x=%.4f -> %.4f y=%.4f", frame, VtRva(frame), point, rel, x, nx, y);
@@ -469,6 +477,11 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
             int keep = isUI ? IsFullWidthFrame(frame, parent - OFS_UI_Frame) : IsKeepClassGlue(frame);
             if (isUI && rel == 0 && y > -0.1f && x < 0.12f && !FromGame((u32)__builtin_return_address(0))) keep = 1;   // map helper: top-left corner group
             float nx = keep ? x : ShiftX(rel, x);
+            if (isUI && keep) {   // HeroBarAspect / CinematicBarsAspect: from the edges of a centred area instead
+                u32 v = VtRva(frame);
+                float e = v == VT(HeroBar) ? AspectInset(g_heroAspect) : v == VT(CinePanel) ? AspectInset(g_cineBarsAspect) : 0.0f;
+                if (e > 0.0f) nx = rel % 3 == 0 ? x + e : rel % 3 == 2 ? x - e : x;
+            }
             if (!isUI && keep && g_menuCut > 0.0f && VtRva(frame) != VT(Sprite) && !IsKeepClass(frame))   // MenuAspect: the menu area's edges
                 nx = rel % 3 == 0 ? x + g_menuCut : rel % 3 == 2 ? x - g_menuCut : x;
             if (isUI && g_worldFull) {
@@ -636,6 +649,7 @@ static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 fla
         if (isUI || (g_glue && IsScreenRoot(parent))) {
             int keep = isUI ? IsFullWidthFrame(frame, parent - OFS_UI_Frame) : IsKeepClassGlue(frame);
             if (!keep) dx = g_e;
+            else if (isUI && VtRva(frame) == VT(CinePanel)) dx = AspectInset(g_cineBarsAspect);   // CinematicBarsAspect
             else if (!isUI && VtRva(frame) != VT(Sprite) && !IsKeepClass(frame)) { dx = g_menuCut; if (dx > 0.0f) AddNarrowed(frame); }   // MenuAspect: screens span the menu area only
             // (not the cursor: its frame is the whole screen, mouse positions are measured in it)
             if (!isUI && VtRva(frame) != VT(Score) && VtRva(frame) != VT(Loading)) g_scoreActive = 0;   // a menu screen again
@@ -1207,7 +1221,7 @@ static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
     LONG x1 = (LONG)(g_e / g_uiW_f * W + 0.5f), x2 = (LONG)((g_e + 0.8f) / g_uiW_f * W + 0.5f);
     // in cinematic mode the letterbox (semi-transparent stone texture) spans the whole width; as in the
     // original, it must lie on black, not on the world
-    if (g_cineFull && InCinematicMode()) { x1 = 0; x2 = W; }
+    if (g_cineFull && InCinematicMode()) { x1 = (LONG)(AspectInset(g_cineBarsAspect) / g_uiW_f * W + 0.5f); x2 = W - x1; }
     RECT8 rc[2] = {
         { x1, (LONG)(H * (1.0f - WORLD_B0 / g_uiH_f)), x2, H },            // console band
         { x1, 0, x2, (LONG)(H * (-WORLD_T0 / g_uiH_f) + 0.5f) }            // thin strip under the top bar
@@ -1268,6 +1282,14 @@ static u32 GetGameBuild(void)
     return build;
 }
 
+// an aspect ratio setting: "16:9" or "1.78"; empty or invalid = 0
+static double IniAspect(const char* ini, const char* key)
+{
+    char k[32]; GetPrivateProfileStringA(INI_SECTION, key, "", k, sizeof k, ini);
+    int aw = 0, ah = 0; double v = 0;
+    if (sscanf(k, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) v = (double)aw / ah; else v = atof(k);
+    return v > 1.0 ? v : 0.0;
+}
 static double ReadAspect(char* src, size_t srcLen)
 {
     // 1) explicit override from W3TrueWidescreen.ini
@@ -1284,13 +1306,10 @@ static double ReadAspect(char* src, size_t srcLen)
       int aw = 0, ah = 0; double v = 0;
       if (sscanf(k, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) v = (double)aw / ah; else v = atof(k);
       g_menuAspectOpt = v; }
-    { char k[32]; GetPrivateProfileStringA(INI_SECTION, "CinematicAspect", "", k, sizeof k, ini);   // e.g. 16:9 or 1.78
-      int aw = 0, ah = 0; double v = 0;
-      if (sscanf(k, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0) v = (double)aw / ah; else v = atof(k);
-      g_cineAspectOpt = v; }
+    g_heroAspect = IniAspect(ini, "HeroBarAspect");
+    g_cineBarsAspect = IniAspect(ini, "CinematicBarsAspect");
+    g_cineDlgAspect = IniAspect(ini, "CinematicDialogueAspect");
     g_worldFull = GetPrivateProfileIntA(INI_SECTION, "WorldFullHeight", 1, ini);
-    g_heroEdge = GetPrivateProfileIntA(INI_SECTION, "HeroBarEdge", 1, ini);
-    g_cineFull = GetPrivateProfileIntA(INI_SECTION, "CinematicFullWidth", 1, ini);
     g_consoleBacking = GetPrivateProfileIntA(INI_SECTION, "ConsoleBacking", 1, ini);
     g_hpUnder = GetPrivateProfileIntA(INI_SECTION, "HealthBarsUnderConsole", 1, ini);
     g_fovFix = GetPrivateProfileIntA(INI_SECTION, "FovFix", 1, ini);
@@ -4981,7 +5000,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.17  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.18  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401, 1.27b / 7085 or 1.28.5 / 7680)"); return; }
     logf_("Warcraft III %s", G->name);
