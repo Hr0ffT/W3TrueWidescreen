@@ -1,7 +1,5 @@
 # W3TrueWidescreen: unstretched widescreen for Warcraft III 1.26a, 1.27b and 1.28.5
 
-*[Русская версия](README.ru.md)*
-
 W3TrueWidescreen makes the classic Warcraft III (Reign of Chaos / The Frozen Throne, patches **1.26a**, **1.27b** and **1.28.5**) look right on 16:9, 16:10 and ultrawide screens. It keeps the game's original look: nothing is stretched, redrawn or replaced.
 
 ## What it does
