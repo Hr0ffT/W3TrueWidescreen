@@ -284,6 +284,7 @@ static void MenuClipPoll(void);
 static void MenuClipAddFrame(u32 layout);
 static int IsNarrowed(u32 f);
 static void SfWrapVtable(u32 vt, const char* what);
+static void ClockStretchAdd(u32 layout);
 static int g_loadingActive, g_scoreActive, g_customLoadPic; static u32 g_loadMinimap, g_loadMinimapParent, g_loadBar[2], g_loadBarParent[2]; static float g_loadBarX[2], g_loadBarY[2];  // MenuAspect: how far the menus' screen edges move in from the screen edges on each side
 static int g_menuBgFull = 1;   // 0: 3D menu backgrounds stretched as in the original game
 static int g_menuEdges = 3;   // MenuLayout: 1 = menu panels at the screen edges, 2 = also widened towards the centre,
@@ -328,6 +329,10 @@ static int   g_worldBottomDefault = 0, g_worldTopDefault = 0;
 //      clicks. Point that operand at our own value: no upper gate when the world is full height. ----
 static float g_pickTop = 0.577f;
 
+static int g_stretchCon;      // StretchedConsole=1: the console and the top bar stretched over the screen width as in the original game
+// the console's left edge and width in UI units: centred 0.8 wide, or (StretchedConsole) the whole screen width
+static float ConL(void) { return g_stretchCon ? 0.0f : g_e; }
+static float ConW(void) { return g_stretchCon ? g_uiW_f : 0.8f; }
 static int g_heroEdge = 1;     // hero portraits (top-left) placed from the screen edge (HeroBarAspect sets how far in)
 static int g_cineFull = 1;     // cinematic letterbox panel placed from the screen edges (CinematicBarsAspect sets how far in)
 // aspect ratios of centred areas (0: the whole screen): HeroBarAspect (hero portraits at its left edge),
@@ -387,6 +392,68 @@ static int g_hpUnder = 1;         // HealthBarsUnderConsole=1: unit health bars 
 
 static void DotAFrameEvent(u32 frame, u32 parent);
 static int FromGame(u32 ret);
+// ---- StretchedConsole: the console and the top bar stretched over the screen width, as in the original game.
+//      Their frames keep the layout of the 0.8-wide interface; when a frame's rectangle is worked out
+//      (CLayoutFrame::Resolve), the horizontal offsets of its points and its width are multiplied by W / 0.8 for that
+//      moment. Frames placed on the screen root then stretch from its edges, and frames placed on them follow, so
+//      the artwork, the buttons and the places where they take clicks all stretch together; text keeps its shape.
+//      The console's frames: those placed on the game interface's root that the mod would otherwise move to the
+//      centre (not the hero bar, the cinematic panel, the world view...), and everything placed on them. ----
+static u32 MakeTrampoline(u32 target, int len);
+static int WriteJmp(u32 from, u32 to);
+static const Code kConResolve[3] = { { 0x6058F0, 6, "\x83\xEC\x10\xD9\xEE\x56" }, { 0x110FA0, 6, "\x55\x8B\xEC\x83\xEC\x10" }, { 0x13F5C0, 6, "\x55\x8B\xEC\x83\xEC\x10" } };
+static u32 g_conRoots[16]; static int g_conRootN;
+static void AddConRoot(u32 f) { for (int i = 0; i < g_conRootN && i < 16; i++) if (g_conRoots[i] == f) return; g_conRoots[g_conRootN++ % 16] = f; }
+static int IsFullWidthFrame(u32 frame, u32 ui);
+static int IsConsoleLayout(u32 L, int depth)
+{
+    if (!L || depth > 24 || IsBadReadPtr((void*)L, 0x60)) return 0;
+    if (VtRva(L) == VT(TimeOfDay)) return 0;    // the clock: a 3D model, stretched when drawn (ClockStretchBegin)
+    for (int i = 0; i < g_conRootN && i < 16; i++) if (g_conRoots[i] == L) return 1;
+    for (int i = 0; i < 9; i++) {
+        u32 p = *(u32*)(L + 8 + i * 4);
+        if (!p || IsBadReadPtr((void*)p, 0x14) || *(u32*)p - g_base != VT(FramePointRel)) continue;
+        u32 rel = *(u32*)(p + 4);
+        if (!rel || rel == L) continue;
+        if (IsGameUIRoot(rel)) { if (!IsFullWidthFrame(L, rel - OFS_UI_Frame)) return 1; }
+        else if (IsConsoleLayout(rel, depth + 1)) return 1;
+    }
+    return 0;
+}
+typedef void (__fastcall *ConResolve_t)(u32 L, u32 edx);
+static ConResolve_t orig_ConResolve;
+static void __fastcall ConResolve_hook(u32 L, u32 edx)
+{
+    (void)edx;
+    if (!g_enabled || !g_stretchCon || !IsConsoleLayout(L, 0)) { orig_ConResolve(L, 0); return; }
+    const float k = g_uiW_f / 0.8f;
+    float w = *(float*)(L + 0x58), px[9]; u32 pp[9];
+    for (int i = 0; i < 9; i++) {
+        u32 p = *(u32*)(L + 8 + i * 4); pp[i] = 0;
+        if (!p || IsBadReadPtr((void*)p, 0x14)) continue;
+        u32 v = *(u32*)p - g_base;
+        int o = v == VT(FramePointRel) ? 0xC : v == VT(FramePointRel) - 0x14 ? 4 : 0;   // relative: x at +0xC, absolute: x at +4
+        if (!o) continue;
+        pp[i] = p + o; px[i] = *(float*)pp[i]; *(float*)pp[i] = px[i] * k;
+    }
+    *(float*)(L + 0x58) = w * k;
+    orig_ConResolve(L, 0);
+    *(float*)(L + 0x58) = w;
+    for (int i = 0; i < 9; i++) if (pp[i]) *(float*)pp[i] = px[i];
+    if (g_debug) { static int n; if (n < 300) { n++;
+        dlogf_("console frame %08X (vt %06X) stretched: rect %.4f..%.4f (width %.4f)", L, VtRva(L), *(float*)(L + 0x44), *(float*)(L + 0x4C), w); } }
+}
+static void InstallStretchedConsole(void)
+{
+    if (!g_stretchCon) return;
+    const Code* c = &kConResolve[BuildIdx()];
+    if (!c->rva || !CodeIs(c)) { logf_("StretchedConsole: not available for this game version"); g_stretchCon = 0; return; }
+    orig_ConResolve = (ConResolve_t)MakeTrampoline(g_base + c->rva, c->len);
+    if (!orig_ConResolve) { g_stretchCon = 0; return; }
+    WriteJmp(g_base + c->rva, (u32)ConResolve_hook);
+    logf_("console and top bar stretched over the screen width (StretchedConsole)");
+}
+
 static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 parent, u32 rel, float x, float y, u32 flag)
 {
     (void)edx;
@@ -462,6 +529,10 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
             frame, VtRva(frame), VtRva(parent), point, rel, x, nx, y); }
         x = nx;
     }
+    if (g_enabled && g_stretchCon && VtRva(frame) == VT(TimeOfDay)) {
+        ClockStretchAdd(frame);
+        dlogf_("time of day indicator %08X on %08X (vt %06X) pt=%u rel=%u x=%.4f y=%.4f", frame, parent, VtRva(parent), point, rel, x, y);
+    }
     if (g_enabled && g_f != 0.0f && point == 6 && rel == 6 && VtRva(frame) == VT(TimeOfDay)) {
         y += g_f;
         // the frame sits at the bottom of the screen and its model draws the top bar ornament far above it: with
@@ -476,7 +547,7 @@ static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 par
             if (isUI) CheckWindowOnce();
             int keep = isUI ? IsFullWidthFrame(frame, parent - OFS_UI_Frame) : IsKeepClassGlue(frame);
             if (isUI && rel == 0 && y > -0.1f && x < 0.12f && !FromGame((u32)__builtin_return_address(0))) keep = 1;   // map helper: top-left corner group
-            float nx = keep ? x : ShiftX(rel, x);
+            float nx = keep || (isUI && g_stretchCon) ? x : ShiftX(rel, x);   // StretchedConsole: scaled when resolved (ConResolve_hook)
             if (isUI && keep) {   // HeroBarAspect / CinematicBarsAspect: from the edges of a centred area instead
                 u32 v = VtRva(frame);
                 float e = v == VT(HeroBar) ? AspectInset(g_heroAspect) : v == VT(CinePanel) ? AspectInset(g_cineBarsAspect) : 0.0f;
@@ -564,8 +635,10 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
     // positions computed at runtime (tooltips, HP bars, floating text) are already in the wide space and stay as is.
     int fixed = (ret == G->retInventory) || (!g_menuEdges && (ret == G->retMenu[0] || ret == G->retMenu[1] || ret == G->retMenu[2]));
     float nx = (g_enabled && fixed) ? x + g_e : x;
+    if (g_enabled && g_stretchCon && ret == G->retInventory) { nx = x; AddConRoot(frame); }   // scaled when resolved
     if (g_enabled && !fixed && !FromGame(ret + g_base) && VtRva(frame) != VT(StatBar) && !OverlayPlacement()) {
-        if (y > 0.5f && x < 0.06f) { }                    // top-left corner group: left screen edge
+        if (g_stretchCon) nx = x * (g_uiW_f / 0.8f);      // StretchedConsole: laid out over the stretched console
+        else if (y > 0.5f && x < 0.06f) { }               // top-left corner group: left screen edge
         else if (y > 0.5f && x > 0.7f) nx = x + 2 * g_e;   // top-right corner group: right screen edge
         else nx = x + g_e;                                // laid out around the 0.8-wide console
         if (y > 0.55f) y += g_f;                          // top strip: follows the top edge; the rest stays with the console
@@ -581,7 +654,7 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
     // lie below the console's top line (0.13; a bar is about 0.005 high). Without it, hide everything up to the
     // top of the decorated edge (minimap frame, command card, about 0.17).
     if (g_enabled && g_worldFull && VtRva(frame) == VT(StatBar)) {
-        const float L = g_e, R = g_e + 0.8f;
+        const float L = ConL(), R = ConL() + ConW();
         typedef float (__fastcall *GetWidth_t)(u32 self, u32 edx);
         float hw = ((GetWidth_t)(*(u32**)frame)[6])(frame, 0) * 0.5f;   // bar width (virtual GetWidth, as the game uses)
         if (!(hw > 0.001f && hw < 0.5f)) hw = 0.015f;          // building bars are up to about 0.25 wide
@@ -607,7 +680,7 @@ static void __fastcall SetAbsPoint_hook(u32 frame, u32 edx, u32 point, float x, 
     // health bars (OccupUnder) and follow the same rules: beside the console they move out to its side, over it
     // they are hidden, as under the top bar
     if (g_enabled && g_worldFull && point == 1 && VtRva(frame) == kOccupVt[BuildIdx()]) {
-        const float L = g_e, R = g_e + 0.8f;
+        const float L = ConL(), R = ConL() + ConW();
         typedef float (__fastcall *GetSize_t)(u32 self, u32 edx);
         float hw = ((GetSize_t)(*(u32**)frame)[6])(frame, 0) * 0.5f, h = ((GetSize_t)(*(u32**)frame)[7])(frame, 0);
         if (!(hw > 0.0f && hw < 0.5f)) hw = 0.02f;
@@ -648,7 +721,7 @@ static void __fastcall SetAllPoints_hook(u32 frame, u32 edx, u32 parent, u32 fla
         int isUI = IsGameUIRoot(parent);
         if (isUI || (g_glue && IsScreenRoot(parent))) {
             int keep = isUI ? IsFullWidthFrame(frame, parent - OFS_UI_Frame) : IsKeepClassGlue(frame);
-            if (!keep) dx = g_e;
+            if (!keep) dx = isUI && g_stretchCon ? 0.0f : g_e;
             else if (isUI && VtRva(frame) == VT(CinePanel)) dx = AspectInset(g_cineBarsAspect);   // CinematicBarsAspect
             else if (!isUI && VtRva(frame) != VT(Sprite) && !IsKeepClass(frame)) { dx = g_menuCut; if (dx > 0.0f) AddNarrowed(frame); }   // MenuAspect: screens span the menu area only
             // (not the cursor: its frame is the whole screen, mouse positions are measured in it)
@@ -840,6 +913,20 @@ static int GetRenderDevice(RenderDev* d)
         if (!dev || IsBadReadPtr((void*)dev, 4) || !IsD3D8Device(dev)) return 0;
         d->dev = dev; d->clear = 36; d->setVp = 40; d->getVp = 41;
         d->W = *(int*)(gx + G->gxWidth); d->H = *(int*)(gx + G->gxWidth + 4);
+        if (d->W <= 0 || d->H <= 0) {
+            // windowed mode (-window): the graphics object leaves the size at 0. Ask the device for its back buffer
+            // (IDirect3DDevice8::GetBackBuffer, IDirect3DSurface8::GetDesc: Width, Height after six DWORDs)
+            typedef HRESULT (__stdcall *GetBB_t)(u32, UINT, UINT, u32*);
+            typedef HRESULT (__stdcall *GetDesc_t)(u32, DWORD*);
+            typedef ULONG (__stdcall *Rel_t)(u32);
+            u32 bb = 0; DWORD desc[8];
+            if (((GetBB_t)(*(u32**)dev)[16])(dev, 0, 0, &bb) == S_OK && bb) {
+                if (((GetDesc_t)(*(u32**)bb)[8])(bb, desc) == S_OK) { d->W = (int)desc[6]; d->H = (int)desc[7]; }
+                ((Rel_t)(*(u32**)bb)[2])(bb);
+            }
+        }
+        if (g_debug) { static int lw = -1, lh = -1; if (d->W != lw || d->H != lh) { lw = d->W; lh = d->H;
+            dlogf_("render device %08X back buffer %dx%d (gx %08X)", dev, d->W, d->H, gx); } }
         return d->W > 0 && d->H > 0;
     }
     typedef HRESULT (__stdcall *QI_t)(u32, const GUID*, void**);
@@ -918,7 +1005,7 @@ static const uint8_t kConsoleTop[128] = {
 };
 static int OverConsole(float x, float y)
 {
-    float cx = x - g_e;
+    float cx = (x - ConL()) * 0.8f / ConW();
     if (cx < 0.0f || cx > 0.8f) return 0;
     int i = (int)(cx / 0.00625f); if (i > 127) i = 127;
     return y < kConsoleTop[i] * 0.001f || y >= g_uiH_f - 0.025f;
@@ -997,6 +1084,25 @@ static int InClipFrame(void)
     for (int i = 1; i < g_clipFrameN; i += 2) if (v - g_clipFrames[i] < 0x1B0) return 1;
     return 0;
 }
+// StretchedConsole: the clock and the top bar's middle are one 3D model (the time of day indicator), drawn at a
+// fixed size from its frame. Its frame stays where the 0.8-wide layout puts it, and while it is being drawn the
+// projection is stretched horizontally from the screen's left edge by W / 0.8, as the whole interface in the original
+static u32 g_clockObj;
+static void ClockStretchAdd(u32 layout)
+{
+    u32 obj = layout - OFS_UI_Frame;
+    if (IsBadReadPtr((void*)obj, 0x1B0)) return;
+    g_clockObj = obj;
+    if (!g_sfThread) g_sfThread = GetCurrentThreadId();
+    SfWrapVtable(*(u32*)obj, "the time of day indicator");
+    SfWrapVtable(*(u32*)layout, "the time of day indicator layout");
+}
+static int InClock(void)
+{
+    if (!g_clockObj || g_sfDepth <= 0) return 0;
+    for (int i = g_sfDepth - 1; i >= 0; i--) if (g_sfStack[i].self - g_clockObj < 0x1B0) return 1;
+    return 0;
+}
 extern void SfExitStub(void);
 void __stdcall SfEnter(u32* retSlot, u32 self)
 {
@@ -1070,21 +1176,41 @@ static int MenuClipBegin(u32 dev)
     if (g_debug) g_clipStat[2]++;
     return 1;
 }
+static float g_clockP[16];
+static int ClockStretchBegin(u32 dev)
+{
+    if (!g_stretchCon || !g_enabled || !InClock()) return 0;
+    u32* vt = *(u32**)dev; int d9 = g_menuClipD9;
+    typedef HRESULT (__stdcall *GetT_t)(u32, u32, float*);
+    typedef HRESULT (__stdcall *SetT_t)(u32, u32, const float*);
+    if (((GetT_t)vt[d9 ? 45 : 38])(dev, 3, g_clockP) != S_OK) return 0;
+    const float k = g_uiW_f / 0.8f;
+    float P[16]; memcpy(P, g_clockP, sizeof P);
+    for (int r = 0; r < 4; r++) P[r * 4 + 0] = k * g_clockP[r * 4 + 0] + (k - 1.0f) * g_clockP[r * 4 + 3];   // x' = k x + (k - 1) w
+    ((SetT_t)vt[d9 ? 44 : 37])(dev, 3, P);
+    if (g_debug) { static int n; if (n++ < 3) dlogf_("clock drawn stretched (k %.3f)", k); }
+    return 1;
+}
+static void ClockStretchEnd(u32 dev, int on)
+{
+    typedef HRESULT (__stdcall *SetT_t)(u32, u32, const float*);
+    if (on) ((SetT_t)(*(u32**)dev)[g_menuClipD9 ? 44 : 37])(dev, 3, g_clockP);
+}
 static void MenuClipEnd(u32 dev, int on)
 {
     typedef HRESULT (__stdcall *SetRS_t)(u32, u32, u32);
     if (on) ((SetRS_t)(*(u32**)dev)[g_menuClipD9 ? 57 : 50])(dev, 152, 0);
 }
 static HRESULT __stdcall h_DP(u32 d, u32 a, u32 b, u32 c)
-    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DP(d, a, b, c); MenuClipEnd(d, k); return r; }
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d), s = ClockStretchBegin(d); HRESULT r = o_DP(d, a, b, c); ClockStretchEnd(d, s); MenuClipEnd(d, k); return r; }
 static HRESULT __stdcall h_DPUP(u32 d, u32 a, u32 b, u32 c, u32 e)
-    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DPUP(d, a, b, c, e); MenuClipEnd(d, k); return r; }
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d), s = ClockStretchBegin(d); HRESULT r = o_DPUP(d, a, b, c, e); ClockStretchEnd(d, s); MenuClipEnd(d, k); return r; }
 static HRESULT __stdcall h_DIP8(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f)
-    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DIP8(d, a, b, c, e, f); MenuClipEnd(d, k); return r; }
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d), s = ClockStretchBegin(d); HRESULT r = o_DIP8(d, a, b, c, e, f); ClockStretchEnd(d, s); MenuClipEnd(d, k); return r; }
 static HRESULT __stdcall h_DIP9(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g)
-    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DIP9(d, a, b, c, e, f, g); MenuClipEnd(d, k); return r; }
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d), s = ClockStretchBegin(d); HRESULT r = o_DIP9(d, a, b, c, e, f, g); ClockStretchEnd(d, s); MenuClipEnd(d, k); return r; }
 static HRESULT __stdcall h_DIPUP(u32 d, u32 a, u32 b, u32 c, u32 e, u32 f, u32 g, u32 h, u32 i)
-    { if (UiHiding()) return 0; int k = MenuClipBegin(d); HRESULT r = o_DIPUP(d, a, b, c, e, f, g, h, i); MenuClipEnd(d, k); return r; }
+    { if (UiHiding()) return 0; int k = MenuClipBegin(d), s = ClockStretchBegin(d); HRESULT r = o_DIPUP(d, a, b, c, e, f, g, h, i); ClockStretchEnd(d, s); MenuClipEnd(d, k); return r; }
 static void HideUiInstall(const RenderDev* rd)
 {
     u32* vt = *(u32**)rd->dev;
@@ -1203,11 +1329,14 @@ static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
         g_afterWorld = 1;                                   // from here to the next frame's world: the interface
         if (g_uiHidden) return r;                           // (no console backing: the world fills the screen)
     }
+    if (g_enabled && g_stretchCon && !g_hideKey) { RenderDev sd; if (GetRenderDevice(&sd)) HideUiInstall(&sd); }
     if (g_enabled && g_dotaRun) DotATopBarFix();
     if (g_debug && g_gameUI && !IsBadReadPtr((void*)g_gameUI, 0x184)) {
         static u32 lastSt = 0xFFFFFFFF; u32 st = *(u32*)(g_gameUI + 0x180);
         if (st != lastSt) { lastSt = st; dlogf_("interface state %u (ui %08X)", st, g_gameUI); }
     }
+    if (g_debug) { static int last = -1; int st = (g_enabled ? 1 : 0) | (g_consoleBacking ? 2 : 0) | (g_worldFull ? 4 : 0) | (g_worldBottomDefault ? 8 : 0) | (g_worldTopDefault ? 16 : 0) | (g_dotaRun ? 32 : 0);
+        if (st != last) { last = st; dlogf_("console backing state %02X", st); } }
     if (!(g_enabled && g_consoleBacking && ((g_worldFull && g_worldBottomDefault && g_worldTopDefault) || g_dotaRun))) return r;
     RenderDev rd;
     if (!GetRenderDevice(&rd)) return r;                         // OpenGL mode or unknown renderer: leave it alone
@@ -1218,7 +1347,7 @@ static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
     VP8 old; if (((GetVP_t)vt[rd.getVp])(dev, &old) != 0) return r;
     VP8 full = { 0, 0, (DWORD)W, (DWORD)H, old.MinZ, old.MaxZ };
     ((SetVP_t)vt[rd.setVp])(dev, &full);
-    LONG x1 = (LONG)(g_e / g_uiW_f * W + 0.5f), x2 = (LONG)((g_e + 0.8f) / g_uiW_f * W + 0.5f);
+    LONG x1 = (LONG)(ConL() / g_uiW_f * W + 0.5f), x2 = (LONG)((ConL() + ConW()) / g_uiW_f * W + 0.5f);
     // in cinematic mode the letterbox (semi-transparent stone texture) spans the whole width; as in the
     // original, it must lie on black, not on the world
     if (g_cineFull && InCinematicMode()) { x1 = (LONG)(AspectInset(g_cineBarsAspect) / g_uiW_f * W + 0.5f); x2 = W - x1; }
@@ -1323,6 +1452,7 @@ static double ReadAspect(char* src, size_t srcLen)
     g_loadFull = GetPrivateProfileIntA(INI_SECTION, "LoadingFullScreen", 0, ini);
     g_scoreMode = GetPrivateProfileIntA(INI_SECTION, "ScoreScreen", 3, ini);
     if (g_scoreMode < 1 || g_scoreMode > 3) g_scoreMode = 3;
+    g_stretchCon = GetPrivateProfileIntA(INI_SECTION, "StretchedConsole", 0, ini);
     { int pct = GetPrivateProfileIntA(INI_SECTION, "UIScale", 100, ini); if (pct < 50) pct = 50; if (pct > 150) pct = 150; g_uiScale = pct / 100.0f; }
     g_dotaOrig = GetPrivateProfileIntA(INI_SECTION, "DotAOriginal", 0, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
@@ -5000,7 +5130,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.18  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.19  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401, 1.27b / 7085 or 1.28.5 / 7680)"); return; }
     logf_("Warcraft III %s", G->name);
@@ -5085,6 +5215,7 @@ static void Install(void)
         orig_RenderWorld = (RenderWorld_t)MakeTrampoline(g_base + G->renderWorld.rva, G->renderWorld.len);
         if (orig_RenderWorld) WriteJmp(g_base + G->renderWorld.rva, (u32)RenderWorld_hook);
     } else logf_("world render code not recognised, console backing off");
+    InstallStretchedConsole();
     InstallFadeFix();
     InstallTextShadow();
     InstallHealthBarLayer();
