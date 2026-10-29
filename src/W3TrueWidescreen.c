@@ -382,6 +382,7 @@ static void CheckWindowOnce(void)
 }
 
 static int g_consoleBacking = 1;
+static int g_conEdges;            // ConsoleEdges=1: the Night Elf console gets leafy ends at its left and right edges (experimental)
 // occupancy marks (COccupUI) above burrows and gold mines: under the console like the health bars
 static const u32 kOccupVt[3] = { 0x93D06C, 0xAC085C, 0xAB1270 };
 static int g_occupUnder;
@@ -440,8 +441,75 @@ static void __fastcall ConResolve_hook(u32 L, u32 edx)
     orig_ConResolve(L, 0);
     *(float*)(L + 0x58) = w;
     for (int i = 0; i < 9; i++) if (pp[i]) *(float*)pp[i] = px[i];
-    if (g_debug) { static int n; if (n < 300) { n++;
-        dlogf_("console frame %08X (vt %06X) stretched: rect %.4f..%.4f (width %.4f)", L, VtRva(L), *(float*)(L + 0x44), *(float*)(L + 0x4C), w); } }
+    if (g_debug) { static int n; if (n < 600) { n++;
+        char pts[256]; int q = 0; pts[0] = 0;
+        for (int i = 0; i < 9 && q < 220; i++) if (pp[i]) {
+            u32 p = *(u32*)(L + 8 + i * 4); int rel = *(u32*)p - g_base == VT(FramePointRel);
+            q += snprintf(pts + q, sizeof pts - q, " p%d%s%06X/%u x=%.4f", i, rel ? "->" : "@abs", rel ? VtRva(*(u32*)(p + 4)) : 0, rel ? *(u32*)(p + 8) : 0, px[i]);
+        }
+        dlogf_("console frame %08X (vt %06X) w=%.4f x %.4f..%.4f ret %06X%s", L, VtRva(L), w, *(float*)(L + 0x48), *(float*)(L + 0x50),
+               (u32)__builtin_return_address(0) - g_base, pts); } }
+}
+// ---- ConsoleEdges (experimental, Night Elf, 1.26a): leafy ends beside the centred console. When the console's
+//      first and last tile textures are set, a texture of our own is added next to each, on the same frame and
+//      layer, bottom-aligned with the tile (512 texel rows = 0.256 UI, as the tiles). ----
+typedef int (__fastcall *SetTex_t)(u32 self, u32 edx, const char* path, u32 flag);
+static SetTex_t orig_SetTex;
+static struct { u32 tile; int side, done; } g_conTiles[8]; static int g_conTileN;
+static void ConEdgeCreate(u32 tile, int right);
+// called every frame in a game: tiles that got their frame and lie at the bottom (the console, not the top bar)
+static void ConEdgesPoll(void)
+{
+    for (int i = 0; i < 8 && i < g_conTileN; i++) {
+        u32 t = g_conTiles[i].tile;
+        if (g_conTiles[i].done || !t) continue;
+        if (IsBadReadPtr((void*)t, 0xE8) || *(u32*)t != g_base + 0x96E440) { g_conTiles[i].done = 1; continue; }
+        u32 parent = *(u32*)(t + 0x74);
+        if (!parent) continue;
+        // the resolved rectangle: bottom +0x44, left +0x48, top +0x4C, right +0x50
+        float bottom = *(float*)(t + 0x44), left = *(float*)(t + 0x48), top = *(float*)(t + 0x4C), right = *(float*)(t + 0x50);
+        if (top <= bottom || right <= left) continue;                  // not laid out yet
+        g_conTiles[i].done = 1;
+        dlogf_("console tile %08X (side %d) on %08X: x %.4f..%.4f y %.4f..%.4f", t, g_conTiles[i].side, parent, left, right, bottom, top);
+        if (bottom < 0.05f) ConEdgeCreate(t, g_conTiles[i].side);
+    }
+}
+static void ConEdgeCreate(u32 tile, int right)
+{
+    typedef void* (__stdcall *Alloc_t)(u32 size, const char* file, u32 line, u32 flags);
+    typedef u32 (__fastcall *TexCtor_t)(u32 self, u32 edx, u32 parent, u32 layer, u32 flag);
+    typedef void (__fastcall *SetSize_t)(u32 self, u32 edx, float v);
+    if (IsBadReadPtr((void*)tile, 0x80)) return;
+    u32 parent = *(u32*)(tile + 0x74), layer = *(u32*)(tile + 0x78);
+    u32 t = (u32)((Alloc_t)(g_base + 0x6EB5B2))(0xE8, (const char*)(g_base + 0x96E500), 0x23, 0);
+    if (!t) return;
+    ((TexCtor_t)(g_base + 0x60D900))(t, 0, parent, layer, 1);
+    int ok = orig_SetTex(t, 0, right ? "UI\\Console\\NightElf\\W3TW-NEEdgeR.blp" : "UI\\Console\\NightElf\\W3TW-NEEdgeL.blp", 0);
+    orig_SetFramePoint(t, 0, 6, tile, 6, right ? 0.0f : -30.0f / 2000.0f, 0.0f, 1);
+    ((SetSize_t)(g_base + G->setWidth))(t, 0, 128.0f / 2000.0f);
+    ((SetSize_t)(g_base + G->setHeight))(t, 0, 512.0f / 2000.0f);
+    logf_("console edge %s: texture %08X on frame %08X layer %u (tile %08X), loaded %d", right ? "right" : "left", t, parent, layer, tile, ok);
+}
+static int __fastcall SetTex_hook(u32 self, u32 edx, const char* path, u32 flag)
+{
+    (void)edx;
+    int r = orig_SetTex(self, 0, path, flag);
+    if (g_enabled && g_conEdges && path && !IsBadStringPtrA(path, MAX_PATH)) {
+        const char* b = strrchr(path, '\\'); b = b ? b + 1 : path;
+        // the tile has no frame yet when its texture is set: remember it, the edge is added when it is drawn
+        int side = !_strnicmp(b, "NightElfUITile01", 16) ? 0 : !_strnicmp(b, "NightElfUITile04", 16) ? 1 : -1;
+        if (side >= 0) { g_conTiles[g_conTileN % 8].tile = self; g_conTiles[g_conTileN % 8].side = side; g_conTiles[g_conTileN % 8].done = 0; g_conTileN++; }
+    }
+    return r;
+}
+static void InstallConEdges(void)
+{
+    if (!g_conEdges) return;
+    if (G->build != 6401 || memcmp((void*)(g_base + 0x60E090), "\x6A\xFF\x68", 3)) { logf_("ConsoleEdges: not available for this game version"); g_conEdges = 0; return; }
+    orig_SetTex = (SetTex_t)MakeTrampoline(g_base + 0x60E090, 7);
+    if (!orig_SetTex) { g_conEdges = 0; return; }
+    WriteJmp(g_base + 0x60E090, (u32)SetTex_hook);
+    logf_("console edges on (ConsoleEdges, experimental)");
 }
 static void InstallStretchedConsole(void)
 {
@@ -454,9 +522,17 @@ static void InstallStretchedConsole(void)
     logf_("console and top bar stretched over the screen width (StretchedConsole)");
 }
 
+static int IsConsoleLayout(u32 L, int depth);
 static void __fastcall SetFramePoint_hook(u32 frame, u32 edx, u32 point, u32 parent, u32 rel, float x, float y, u32 flag)
 {
     (void)edx;
+    // StretchedConsole: a grid frame (command card, inventory) places its buttons from its own, already stretched,
+    // rectangle. Those offsets are in screen units already: take the stretch out, so resolving does not apply it twice
+    if (g_enabled && g_stretchCon) {
+        static const u32 kGridRet[3][2] = { { 0x612520, 0x61276C }, { 0x10E5AC, 0x10E923 }, { 0x13CADC, 0x13CE53 } };
+        u32 r = (u32)__builtin_return_address(0) - g_base;
+        if ((r == kGridRet[BuildIdx()][0] || r == kGridRet[BuildIdx()][1]) && IsConsoleLayout(parent, 0)) x /= g_uiW_f / 0.8f;
+    }
     DotAFrameEvent(frame, parent);
     if (g_enabled && g_cineFull && x == 0.0f && y == 0.0f && point == rel && (point == 0 || point == 8) && VtRva(parent) == VT(CinePanel)) {
         // CinematicTopBorder (TOPLEFT) / CinematicBottomBorder (BOTTOMRIGHT) are 0.8 wide and anchored at one
@@ -1329,6 +1405,7 @@ static int __fastcall RenderWorld_hook(u32 ecx, u32 edx)
         g_afterWorld = 1;                                   // from here to the next frame's world: the interface
         if (g_uiHidden) return r;                           // (no console backing: the world fills the screen)
     }
+    if (g_enabled && g_conEdges) ConEdgesPoll();
     if (g_enabled && g_stretchCon && !g_hideKey) { RenderDev sd; if (GetRenderDevice(&sd)) HideUiInstall(&sd); }
     if (g_enabled && g_dotaRun) DotATopBarFix();
     if (g_debug && g_gameUI && !IsBadReadPtr((void*)g_gameUI, 0x184)) {
@@ -1440,6 +1517,7 @@ static double ReadAspect(char* src, size_t srcLen)
     g_cineDlgAspect = IniAspect(ini, "CinematicDialogueAspect");
     g_worldFull = GetPrivateProfileIntA(INI_SECTION, "WorldFullHeight", 1, ini);
     g_consoleBacking = GetPrivateProfileIntA(INI_SECTION, "ConsoleBacking", 1, ini);
+    g_conEdges = GetPrivateProfileIntA(INI_SECTION, "ConsoleEdges", 0, ini);
     g_hpUnder = GetPrivateProfileIntA(INI_SECTION, "HealthBarsUnderConsole", 1, ini);
     g_fovFix = GetPrivateProfileIntA(INI_SECTION, "FovFix", 1, ini);
     g_fadeFix = GetPrivateProfileIntA(INI_SECTION, "FadeFix", 1, ini);
@@ -3957,8 +4035,23 @@ static int ServeBnetBar(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
     return r;
 }
 
+static void SsCacheDir(char* dir);
+// ConsoleEdges: the edge textures, from the cache folder
+static int ServeConEdge(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
+{
+    const char* bn = strrchr(name, '\\'); bn = bn ? bn + 1 : name;
+    if (_strnicmp(bn, "W3TW-", 5)) return 0;
+    if (_stricmp(bn + 5, "NEEdgeL.blp") && _stricmp(bn + 5, "NEEdgeR.blp")) return 0;
+    char dir[MAX_PATH], path[MAX_PATH]; SsCacheDir(dir);
+    snprintf(path, sizeof path, "%s\\%s", dir, bn + 5);
+    BOOL r = orig_SOpenEx(mpq, path, (scope & ~4u) | 3u, ph);
+    if (r && (u32)*ph < 0x10000) { CloseHandle(*ph); *ph = 0; r = FALSE; }
+    if (!r) logf_("console edges: %s not found in the cache folder", bn + 5);
+    return r;
+}
 static BOOL __stdcall SOpenEx_hook(HANDLE mpq, const char* name, DWORD scope, HANDLE* ph)
 {
+    if (g_conEdges && name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeConEdge(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeBnetBar(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeBnetDoors(mpq, name, scope, ph)) return TRUE;
     if (name && ph && !IsBadStringPtrA(name, MAX_PATH) && ServeMenuPanels(mpq, name, scope, ph)) return TRUE;
@@ -5130,7 +5223,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.19  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.19.1  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401, 1.27b / 7085 or 1.28.5 / 7680)"); return; }
     logf_("Warcraft III %s", G->name);
@@ -5216,6 +5309,7 @@ static void Install(void)
         if (orig_RenderWorld) WriteJmp(g_base + G->renderWorld.rva, (u32)RenderWorld_hook);
     } else logf_("world render code not recognised, console backing off");
     InstallStretchedConsole();
+    InstallConEdges();
     InstallFadeFix();
     InstallTextShadow();
     InstallHealthBarLayer();
