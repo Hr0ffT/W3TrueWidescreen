@@ -45,6 +45,7 @@ All settings live in `W3TrueWidescreen.ini` and are described there. The main on
 | Option | Default | Meaning |
 |---|---|---|
 | `WorldFullHeight` | 1 | World behind the console (0 = original black strips) |
+| `ConsoleClickThrough` | 0 | 1 = clicks on the console's artwork reach the world behind it (units seen through its gaps can be selected) |
 | `FovFix` | 1 | Original 4:3 vertical field of view (0 = engine default, zoomed in) |
 | `CameraZoomOut` | 1.0 | Extra zoom-out for the game camera |
 | `StretchedConsole` | 0 | 1 = the console and the top bar are stretched over the screen width as in the original game, the rest stays unstretched |

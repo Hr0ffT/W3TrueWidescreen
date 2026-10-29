@@ -1,5 +1,6 @@
 # W3TrueWidescreen changelog
 
+- **1.20** — `ConsoleClickThrough` (new): clicks on the console's and top bar's artwork can reach the world behind them, so units seen through the console's gaps can be selected. Off by default.
 - **1.19.1** — `StretchedConsole`: the command card buttons stay in their slots (they drifted apart and the last column went off screen).
 - **1.19** — `StretchedConsole`: the in-game console and the top bar can be stretched over the screen width as in the original game, while the rest of the interface stays unstretched. Windowed mode (`-window`): the console's see-through gaps are black again instead of showing the world.
 - **1.18** — Hero portraits and the cutscene letterbox can be placed in a centred area such as 16:9 on very wide screens: `HeroBarAspect` and `CinematicBarsAspect` replace `HeroBarEdge` and `CinematicFullWidth` (empty = the screen edges as before, `4:3` = the old 0). `CinematicAspect` is renamed to `CinematicDialogueAspect`, the dialogue stays inside the letterbox.

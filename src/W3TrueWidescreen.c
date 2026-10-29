@@ -382,6 +382,7 @@ static void CheckWindowOnce(void)
 }
 
 static int g_consoleBacking = 1;
+static int g_clickThrough;        // ConsoleClickThrough=1: clicks on the console's artwork reach the world behind it
 static int g_conEdges;            // ConsoleEdges=1: the Night Elf console gets leafy ends at its left and right edges (experimental)
 // occupancy marks (COccupUI) above burrows and gold mines: under the console like the health bars
 static const u32 kOccupVt[3] = { 0x93D06C, 0xAC085C, 0xAB1270 };
@@ -1090,7 +1091,7 @@ typedef int (__fastcall *WorldPick_t)(u32 ecx, u32 edx, float x, float y, u32 a,
 static WorldPick_t orig_WorldPick;
 static int __fastcall WorldPick_hook(u32 ecx, u32 edx, float x, float y, u32 a, u32 b, u32 c)
 {
-    if (g_enabled && g_worldFull && g_worldBottomDefault && g_worldTopDefault && !g_dotaRun
+    if (g_enabled && !g_clickThrough && g_worldFull && g_worldBottomDefault && g_worldTopDefault && !g_dotaRun
         && OverConsole(x, y))
         return 0;
     return orig_WorldPick(ecx, edx, x, y, a, b, c);
@@ -1518,6 +1519,7 @@ static double ReadAspect(char* src, size_t srcLen)
     g_worldFull = GetPrivateProfileIntA(INI_SECTION, "WorldFullHeight", 1, ini);
     g_consoleBacking = GetPrivateProfileIntA(INI_SECTION, "ConsoleBacking", 1, ini);
     g_conEdges = GetPrivateProfileIntA(INI_SECTION, "ConsoleEdges", 0, ini);
+    g_clickThrough = GetPrivateProfileIntA(INI_SECTION, "ConsoleClickThrough", 0, ini);
     g_hpUnder = GetPrivateProfileIntA(INI_SECTION, "HealthBarsUnderConsole", 1, ini);
     g_fovFix = GetPrivateProfileIntA(INI_SECTION, "FovFix", 1, ini);
     g_fadeFix = GetPrivateProfileIntA(INI_SECTION, "FadeFix", 1, ini);
@@ -5223,7 +5225,7 @@ static void Install(void)
 
     g_base = (u32)GetModuleHandleA("Game.dll");
     u32 build = GetGameBuild();
-    logf_("W3TrueWidescreen 1.19.1  Game.dll build %u", build);
+    logf_("W3TrueWidescreen 1.20  Game.dll build %u", build);
     for (size_t i = 0; i < sizeof kGames / sizeof kGames[0]; i++) if (kGames[i].build == build) G = &kGames[i];
     if (!g_base || !G) { logf_("unsupported game version, doing nothing (need 1.26a / 6401, 1.27b / 7085 or 1.28.5 / 7680)"); return; }
     logf_("Warcraft III %s", G->name);
